@@ -2,8 +2,20 @@
 
 from pathlib import Path
 import sys
+from types import ModuleType
 import unittest
 from unittest.mock import Mock, patch
+
+
+try:
+    import tkinter  # noqa: F401
+except ModuleNotFoundError:
+    tkinter_stub = ModuleType("tkinter")
+    ttk_stub = ModuleType("tkinter.ttk")
+    ttk_stub.Frame = type("Frame", (), {})
+    tkinter_stub.ttk = ttk_stub
+    sys.modules["tkinter"] = tkinter_stub
+    sys.modules["tkinter.ttk"] = ttk_stub
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
