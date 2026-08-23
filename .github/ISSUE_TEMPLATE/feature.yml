@@ -1,0 +1,63 @@
+name: Feature request
+description: Plan a user-facing feature or foundational capability
+title: "[Feature] "
+labels:
+  - feature
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Complete this intake before implementation. Add the issue to the project
+        Kanban board and use a dedicated feature branch.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or operational problem should this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Intended outcome
+      description: Describe observable success without prescribing implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List objectively verifiable completion criteria.
+      placeholder: |
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and privacy considerations
+      description: Note data, identities, permissions, abuse cases, or unknowns.
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and constraints
+      description: Identify related features, external systems, deadlines, or assumptions.
+
+  - type: checkboxes
+    id: readiness
+    attributes:
+      label: Intake readiness
+      options:
+        - label: This feature will receive a plan before implementation.
+          required: true
+        - label: This feature will use a dedicated branch.
+          required: true
+        - label: This feature will be documented and tested locally.
+          required: true

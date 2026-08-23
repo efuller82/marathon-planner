@@ -1,0 +1,4 @@
+# Extended for the chosen stack during bootstrap.
+.env
+.env.*
+.local/
