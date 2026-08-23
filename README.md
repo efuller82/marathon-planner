@@ -15,8 +15,9 @@ The repository includes a runnable Tkinter weekly editor with tested domain
 models for ordered workouts, distance- and time-based goals, and paired ROAD
 and TRAIL choices. The editor can import the versioned local JSON format below.
 The core can also encode each dated workout as deterministic ROAD and TRAIL
-Garmin FIT variants and export the complete open plan as one deterministic ZIP.
-Watch installation is an upcoming feature.
+Garmin FIT variants, export the complete open plan as one deterministic ZIP,
+and preview a selected upcoming USB installation block without changing the
+device. Applying the preview to a physical watch is not yet implemented.
 
 ## Local JSON plan format
 
@@ -96,6 +97,24 @@ Member order, timestamps, permissions, and storage are fixed, so an identical
 plan produces identical ZIP bytes. Archive paths and generated filenames are
 validated. Export can replace a recognized Marathon Planner package at the
 same destination, but refuses to overwrite unrelated files or symbolic links.
+
+## USB installation dry run
+
+After importing a dated plan, choose the start week, number of contiguous
+weeks, and ROAD or TRAIL variant under **USB install dry run**, then select the
+connected device root. The preview requires a bounded Garmin
+`GarminDevice.xml` with one unambiguous existing `NewFiles` FIT destination. It
+lists each proposed copy, replacement, removal, and metadata update without
+writing any device file or requesting Garmin credentials.
+
+Rotation ownership uses a device-bound Marathon Planner manifest containing
+the managed relative path, byte count, and SHA-256 digest of every staged FIT
+file. A missing prior file is treated as already consumed by the device. A
+tampered managed file, malformed manifest, unsafe path, symbolic link, or
+unrelated file collision blocks the preview rather than guessing. Unrelated
+device files are never proposed for replacement or removal. Physical-device
+compatibility and application of the preview remain unverified and
+unimplemented.
 
 ## Run locally
 

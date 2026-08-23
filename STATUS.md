@@ -30,37 +30,47 @@
 - Export validates member paths and generated filenames, writes atomically,
   replaces only recognized Marathon Planner packages, and preserves unrelated
   files and symbolic links.
-- The full local gate compiles the project and runs 62 passing unit tests.
-- CI is configured to run the same compilation and unit-test gate on pull
-  requests.
-- Physical Garmin-device compatibility remains unverified.
+- The desktop USB installer previews an explicit contiguous week block and
+  ROAD or TRAIL selection before asking for confirmation.
+- Confirmed USB application regenerates the exact preview, revalidates Garmin
+  identity and device-bound SHA-256 ownership before each change, stages new
+  bytes, rolls back interrupted commits, and updates ownership metadata last.
+- USB installation never requests Garmin credentials and preserves unrelated
+  files. Missing previously owned workouts are treated as already consumed by
+  the device.
+- The full gate compiles the project and runs 92 passing unit tests using only
+  synthetic workout and filesystem data.
+- Physical Garmin-device compatibility remains explicitly unverified.
 
 ## This session
 
-- Built issue #4 on `feature/4-plan-package-export` with a standard-library ZIP
-  writer and desktop export action.
-- Fixed archive member order, timestamps, permissions, and storage so identical
-  plans produce identical ZIP bytes.
-- Added a versioned manifest with SHA-256 inventory plus a complete version 1
-  `plan.json` representation of the open user-authored plan.
-- Added RFC 5545 all-day calendar events on each authored workout date, mapped
-  to the matching ROAD and TRAIL FIT files without rescheduling.
-- Added concise in-package instructions for terrain selection and account-free
-  local USB transfer.
-- Added atomic destination writes and guarded replacement for positively
-  identified Marathon Planner packages only.
-- Added synthetic archive, calendar, FIT-content, path-safety, replacement, and
-  desktop-action coverage.
+- Completed issue #5 application on `feature/5-usb-workout-install` without
+  changing the established dry-run contract.
+- Added a warning confirmation dialog that applies only the preview the user
+  saw; cancellation writes nothing, and stale plan/device/filesystem state
+  requires a new preview.
+- Staged FIT and manifest bytes on the destination filesystem before commit,
+  reserved verified rollback copies for replacements and removals, and made
+  the ownership manifest the final committed update.
+- Rechecked device identity, destination, prior manifest bytes, target absence,
+  and owned-file size/digest immediately before each applicable change.
+- Added rollback safeguards that refuse to overwrite or remove a file that
+  appeared or changed during recovery.
+- Added synthetic tests for confirmation, exact-preview expiry, post-staging
+  collisions and manifest tampering, manifest-last ordering, successful
+  application, and interrupted copy, replacement, and rotation recovery.
 
 ## Next
 
-1. Start issue #5 from current `master` on `feature/5-usb-workout-install` and
-   define the dry-run installation contract for a user-selected upcoming block.
-2. Detect Garmin workout destinations conservatively and rotate only files
-   positively identified as Marathon Planner output.
-3. Keep physical-device compatibility explicitly unverified until an owner-run
-   hardware test is available.
+1. On a physical Garmin mass-storage device, owner-run a small synthetic-plan
+   preview/install/consume/rotate check and record any compatibility defect in
+   a new approved issue before changing the unverified compatibility claim.
+2. If the hardware check succeeds, record the tested model and observed result
+   without including real runner plan data or device identifiers.
+3. Approve and add the next feature to the project board before starting
+   another feature branch; the current five-item backlog is otherwise complete.
 
 ## Blockers
 
-- None.
+- Physical-device compatibility requires an owner-provided Garmin device and
+  remains outside automated verification.
