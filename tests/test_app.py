@@ -34,6 +34,7 @@ from marathon_planner.models import (  # noqa: E402
     WeeklyWorkout,
 )
 from marathon_planner.plan_import import PlanImportError  # noqa: E402
+from marathon_planner.usb_install import UsbInstallError  # noqa: E402
 
 
 class StatusStub:
@@ -190,6 +191,93 @@ class WeeklyEditorActionTests(unittest.TestCase):
         self.assertFalse(exported)
         export.assert_not_called()
         self.assertIn("Fix workout 1", app.status.value)
+
+    def test_usb_preview_requires_an_imported_dated_plan(self) -> None:
+        app = self.make_app()
+
+        preview = app.preview_usb_install(
+            "synthetic-device",
+            start_week=1,
+            week_count=1,
+            terrain="ROAD",
+        )
+
+        self.assertIsNone(preview)
+        self.assertIn("import a dated JSON plan", app.status.value)
+
+    def test_usb_preview_stores_edits_and_reports_dry_run_only(self) -> None:
+        app = self.make_app()
+        workout = WeeklyWorkout(
+            day="2030-04-02",
+            title="Synthetic run",
+            goal=RunGoal(GoalType.TIME, 30, "min"),
+            road_choice="Paved loop",
+            trail_choice="Wooded loop",
+        )
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((workout,), start_date=date(2030, 4, 1)),)
+        )
+        app._displayed_week_index = 0
+        dry_run = Mock(changes=(Mock(), Mock()), workout_count=1)
+
+        with (
+            patch.object(app, "_store_visible_imported_week", return_value=True) as store,
+            patch(
+                "marathon_planner.app.build_usb_install_preview",
+                return_value=dry_run,
+            ) as build_preview,
+        ):
+            preview = app.preview_usb_install(
+                "synthetic-device",
+                start_week="1",
+                week_count="1",
+                terrain="TRAIL",
+            )
+
+        self.assertIs(preview, dry_run)
+        store.assert_called_once_with()
+        build_preview.assert_called_once_with(
+            app.open_plan,
+            "synthetic-device",
+            start_week=1,
+            week_count=1,
+            terrain="TRAIL",
+        )
+        self.assertEqual(
+            app.status.value,
+            "USB dry run: 2 planned change(s) for 1 workout(s); no files changed.",
+        )
+
+    def test_usb_preview_reports_fail_closed_error(self) -> None:
+        app = self.make_app()
+        workout = WeeklyWorkout(
+            day="2030-04-02",
+            title="Synthetic run",
+            goal=RunGoal(GoalType.TIME, 30, "min"),
+            road_choice="Paved loop",
+            trail_choice="Wooded loop",
+        )
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((workout,), start_date=date(2030, 4, 1)),)
+        )
+        app._displayed_week_index = 0
+
+        with (
+            patch.object(app, "_store_visible_imported_week", return_value=True),
+            patch(
+                "marathon_planner.app.build_usb_install_preview",
+                side_effect=UsbInstallError("Garmin identity is ambiguous."),
+            ),
+        ):
+            preview = app.preview_usb_install(
+                "synthetic-device",
+                start_week=1,
+                week_count=1,
+                terrain="ROAD",
+            )
+
+        self.assertIsNone(preview)
+        self.assertIn("identity is ambiguous", app.status.value)
 
 
 if __name__ == "__main__":

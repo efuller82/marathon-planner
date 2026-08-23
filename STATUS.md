@@ -30,36 +30,44 @@
 - Export validates member paths and generated filenames, writes atomically,
   replaces only recognized Marathon Planner packages, and preserves unrelated
   files and symbolic links.
-- The full local gate compiles the project and runs 62 passing unit tests.
-- CI is configured to run the same compilation and unit-test gate on pull
-  requests.
-- Physical Garmin-device compatibility remains unverified.
+- The full gate on `master` compiles the project and runs 62 passing unit tests.
+- USB installation and physical Garmin-device compatibility are not live and
+  remain explicitly unverified.
 
 ## This session
 
-- Built issue #4 on `feature/4-plan-package-export` with a standard-library ZIP
-  writer and desktop export action.
-- Fixed archive member order, timestamps, permissions, and storage so identical
-  plans produce identical ZIP bytes.
-- Added a versioned manifest with SHA-256 inventory plus a complete version 1
-  `plan.json` representation of the open user-authored plan.
-- Added RFC 5545 all-day calendar events on each authored workout date, mapped
-  to the matching ROAD and TRAIL FIT files without rescheduling.
-- Added concise in-package instructions for terrain selection and account-free
-  local USB transfer.
-- Added atomic destination writes and guarded replacement for positively
-  identified Marathon Planner packages only.
-- Added synthetic archive, calendar, FIT-content, path-safety, replacement, and
-  desktop-action coverage.
+- Started issue #5 from current `master` on
+  `feature/5-usb-workout-install` and moved its board card to In progress.
+- Added a preview-only USB installation contract for an explicit one-based
+  start week, contiguous week count, and ROAD or TRAIL selection.
+- Device detection now requires one bounded Garmin `GarminDevice.xml`, a valid
+  device ID, and one unambiguous existing `NewFiles` FIT destination; unsafe,
+  missing, symbolic-link, and malformed paths fail closed.
+- Defined device-bound ownership metadata with exact schema, safe relative FIT
+  paths, byte counts, and SHA-256 digests. Duplicate fields, non-finite values,
+  traversal, wrong-device manifests, unrelated collisions, and modified owned
+  files are rejected.
+- Dry runs list copies, verified replacements, verified removals, and ownership
+  metadata changes. Missing previously owned files are treated as already
+  consumed by the device; unrelated files are preserved.
+- Added desktop controls for start week, block size, terrain, device-root
+  selection, and a scrollable preview that states no files were changed.
+- Added synthetic-filesystem and headless desktop coverage. The feature-branch
+  gate compiles the project and runs 80 passing unit tests.
+- No USB mutation function exists yet, so this milestone cannot write, replace,
+  or remove any device file and never requests Garmin credentials.
 
 ## Next
 
-1. Start issue #5 from current `master` on `feature/5-usb-workout-install` and
-   define the dry-run installation contract for a user-selected upcoming block.
-2. Detect Garmin workout destinations conservatively and rotate only files
-   positively identified as Marathon Planner output.
-3. Keep physical-device compatibility explicitly unverified until an owner-run
-   hardware test is available.
+1. On `feature/5-usb-workout-install`, implement confirmation-gated application
+   of the exact dry-run contract, revalidating device identity and ownership
+   immediately before each change.
+2. Make staged writes failure-safe, update the ownership manifest last, and add
+   synthetic interruption, collision, tampering, and unrelated-file tests.
+3. Open the issue's single pull request only after the full install acceptance
+   criteria are complete and the local gate remains green.
+4. Keep physical-device compatibility explicitly unverified until an owner-run
+   Garmin hardware test is available.
 
 ## Blockers
 
