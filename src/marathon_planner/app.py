@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import date
+from pathlib import Path
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, ttk
 from typing import Callable
 
 from marathon_planner.editor import GOAL_UNITS, build_week, parse_workout
-from marathon_planner.models import GoalType, WeeklyWorkout
+from marathon_planner.models import GoalType, TrainingPlan, TrainingWeek, WeeklyWorkout
+from marathon_planner.plan_import import PlanImportError, load_plan_file
 
 
 class WorkoutRowEditor(ttk.Frame):
@@ -88,6 +91,17 @@ class WorkoutRowEditor(ttk.Frame):
             trail_choice=self.trail_choice.get(),
         )
 
+    def load_workout(self, workout: WeeklyWorkout) -> None:
+        """Populate a row from one already-validated authored workout."""
+
+        self.day.set(workout.day)
+        self.title.set(workout.title)
+        self.goal_type.set(workout.goal.goal_type.value)
+        self.value.set(str(workout.goal.value))
+        self.unit.set(workout.goal.unit)
+        self.road_choice.set(workout.road_choice)
+        self.trail_choice.set(workout.trail_choice)
+
 
 class MarathonPlannerApp(ttk.Frame):
     """Local weekly plan editor."""
@@ -100,6 +114,8 @@ class MarathonPlannerApp(ttk.Frame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(2, weight=1)
         self.rows: list[WorkoutRowEditor] = []
+        self.open_plan: TrainingPlan | None = None
+        self._displayed_week_index: int | None = None
 
         ttk.Label(self, text="Marathon Planner", font=("Segoe UI", 20)).grid(
             row=0, column=0, sticky="w"
@@ -113,11 +129,24 @@ class MarathonPlannerApp(ttk.Frame):
         editor.grid(row=2, column=0, sticky="nsew")
         editor.columnconfigure(0, weight=1)
         self.rows_frame = ttk.Frame(editor)
-        self.rows_frame.grid(row=1, column=0, sticky="nsew")
+        self.rows_frame.grid(row=2, column=0, sticky="nsew")
         self.rows_frame.columnconfigure(0, weight=1)
 
+        week_controls = ttk.Frame(editor)
+        week_controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(week_controls, text="Open week").grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
+        self.week_selector = ttk.Combobox(
+            week_controls,
+            state="disabled",
+            width=24,
+        )
+        self.week_selector.grid(row=0, column=1, sticky="w")
+        self.week_selector.bind("<<ComboboxSelected>>", self._select_imported_week)
+
         headers = ttk.Frame(editor)
-        headers.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        headers.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         headings = (
             ("Day", 12),
             ("Workout", 18),
@@ -142,13 +171,18 @@ class MarathonPlannerApp(ttk.Frame):
         ttk.Button(controls, text="Validate week", command=self.validate_week).grid(
             row=0, column=1, sticky="w", padx=(8, 0)
         )
+        ttk.Button(
+            controls,
+            text="Import JSON plan",
+            command=self.choose_plan_file,
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
         self.status = tk.StringVar(
             value="Enter each authored workout and its ROAD and TRAIL choices."
         )
         ttk.Label(controls, textvariable=self.status).grid(
-            row=0, column=2, sticky="w", padx=(16, 0)
+            row=0, column=3, sticky="w", padx=(16, 0)
         )
-        controls.columnconfigure(2, weight=1)
+        controls.columnconfigure(3, weight=1)
 
         self.add_workout()
 
@@ -172,22 +206,128 @@ class MarathonPlannerApp(ttk.Frame):
         for index, row in enumerate(self.rows):
             row.grid(row=index, column=0, sticky="ew", pady=(0, 8))
 
-    def validate_week(self) -> None:
-        """Validate all rows and report the first actionable problem."""
+    def choose_plan_file(self) -> None:
+        """Ask for one local JSON file, without sending it off the machine."""
 
+        path = filedialog.askopenfilename(
+            title="Import Marathon Planner JSON plan",
+            filetypes=(("JSON plan", "*.json"),),
+        )
+        if path:
+            self.import_plan(path)
+
+    def import_plan(self, path: str | Path) -> bool:
+        """Validate a whole plan before replacing the open editor content."""
+
+        try:
+            plan = load_plan_file(path)
+        except PlanImportError as error:
+            self.status.set(f"Plan not imported: {error}")
+            return False
+
+        first_week = plan.weeks[0]
+        self._replace_visible_workouts(first_week.workouts)
+        self.open_plan = plan
+        self._displayed_week_index = 0
+        self.week_selector.configure(
+            values=tuple(
+                f"Week {index}: {week.start_date.isoformat()}"
+                for index, week in enumerate(plan.weeks, start=1)
+                if week.start_date is not None
+            ),
+            state="readonly",
+        )
+        self.week_selector.current(0)
+        workout_count = sum(len(week.workouts) for week in plan.weeks)
+        self.status.set(
+            f"Imported {len(plan.weeks)} week(s) and {workout_count} workout(s)."
+        )
+        return True
+
+    def _replace_visible_workouts(
+        self, workouts: tuple[WeeklyWorkout, ...]
+    ) -> None:
+        new_rows: list[WorkoutRowEditor] = []
+        try:
+            for workout in workouts:
+                row = WorkoutRowEditor(
+                    self.rows_frame,
+                    on_remove=self.remove_workout,
+                )
+                new_rows.append(row)
+                row.load_workout(workout)
+        except Exception:
+            for row in new_rows:
+                row.destroy()
+            raise
+
+        old_rows = self.rows
+        self.rows = new_rows
+        for row in old_rows:
+            row.destroy()
+        self._layout_rows()
+
+    def _select_imported_week(self, _event: object = None) -> None:
+        if self.open_plan is None or self._displayed_week_index is None:
+            return
+        selected_index = self.week_selector.current()
+        if selected_index < 0 or selected_index == self._displayed_week_index:
+            return
+
+        if not self._store_visible_imported_week():
+            self.week_selector.current(self._displayed_week_index)
+            return
+
+        self._replace_visible_workouts(self.open_plan.weeks[selected_index].workouts)
+        self._displayed_week_index = selected_index
+        self.status.set(f"Showing imported week {selected_index + 1}.")
+
+    def _build_visible_week(self, start_date: date | None = None) -> TrainingWeek:
         workouts: list[WeeklyWorkout] = []
         for index, row in enumerate(self.rows, start=1):
             try:
                 workouts.append(row.to_workout())
             except ValueError as error:
-                self.status.set(f"Fix workout {index}: {error}")
-                return
+                raise ValueError(f"Fix workout {index}: {error}") from error
+
+        week = build_week(workouts)
+        if start_date is None:
+            return week
+        return TrainingWeek(week.workouts, start_date=start_date)
+
+    def _store_visible_imported_week(self) -> bool:
+        if self.open_plan is None or self._displayed_week_index is None:
+            return True
+
+        current = self.open_plan.weeks[self._displayed_week_index]
+        try:
+            updated = self._build_visible_week(current.start_date)
+        except ValueError as error:
+            self.status.set(str(error))
+            return False
+
+        weeks = list(self.open_plan.weeks)
+        weeks[self._displayed_week_index] = updated
+        self.open_plan = TrainingPlan(tuple(weeks))
+        return True
+
+    def validate_week(self) -> None:
+        """Validate all rows and report the first actionable problem."""
 
         try:
-            week = build_week(workouts)
+            start_date = None
+            if self.open_plan is not None and self._displayed_week_index is not None:
+                start_date = self.open_plan.weeks[
+                    self._displayed_week_index
+                ].start_date
+            week = self._build_visible_week(start_date)
         except ValueError as error:
             self.status.set(str(error))
             return
+        if self.open_plan is not None and self._displayed_week_index is not None:
+            weeks = list(self.open_plan.weeks)
+            weeks[self._displayed_week_index] = week
+            self.open_plan = TrainingPlan(tuple(weeks))
         self.status.set(f"Week is valid: {len(week.workouts)} workout(s).")
 
 
