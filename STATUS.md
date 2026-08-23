@@ -1,6 +1,6 @@
 # Status
 
-- **Updated:** 2026-08-24
+- **Updated:** 2026-08-23
 
 ## Live
 
@@ -11,76 +11,83 @@
 - A local Tkinter editor runs with `python run.py`; users can add and remove
   ordered workout rows, validate authored weeks, and switch among imported
   weeks.
-- The redesigned desktop window (issue #14) sizes itself to the screen it opens
-  on and keeps every action visible: column headings share one layout with the
-  workout rows so they always line up, the workout list scrolls instead of
-  pushing buttons off screen, and a full-width status bar wraps long safety
-  messages.
-- The window now has File and Help menus (Ctrl+O import, Ctrl+E export), a
-  plain-language "How to use Marathon Planner" help dialog, Previous/Next week
-  buttons, an open-plan summary line, and export/install buttons that stay
-  disabled with an explanation until a dated plan is imported.
 - The core model supports validated distance goals (`mi`, `km`, or `m`) and
-  time goals (`sec`, `min`, or `hr`); each workout preserves distinct ROAD and
-  TRAIL choices under one user-authored goal.
+  time goals (`sec`, `min`, or `hr`).
+- Each workout preserves distinct ROAD and TRAIL choices under one
+  user-authored goal.
 - Version 1 local JSON plan import validates file type, size, exact schema,
   duplicate fields, dates, bounds, and domain values before replacing the open
   plan.
 - Each dated workout deterministically encodes to distinct ROAD and TRAIL FIT
-  protocol 2.0/profile 21.00 files; names, identifiers, and bytes are stable
-  and collision-safe within a plan.
+  protocol 2.0/profile 21.00 files without changing the authored goal.
+- FIT filenames, public workout identifiers, file numbers, timestamps, and
+  bytes are stable and collision-safe within a plan.
 - The desktop app exports the complete open plan as one deterministic local ZIP
-  with a hashed manifest, importable plan JSON, authored-date iCalendar, local
-  transfer instructions, and terrain-separated FIT files.
-- The USB installer previews an explicit week block and terrain, applies only
-  the confirmed exact preview, revalidates identity and SHA-256 ownership
-  before each change, rolls back interrupted commits, preserves unrelated
-  files, and never requests Garmin credentials.
-- The full gate compiles the project and runs 98 passing unit tests using only
-  synthetic workout and filesystem data.
+  after validating and storing visible edits.
+- Package schema version 1 contains a hashed manifest, importable plan JSON,
+  authored-date iCalendar, local transfer instructions, and terrain-separated
+  FIT files.
+- Export validates member paths and generated filenames, writes atomically,
+  replaces only recognized Marathon Planner packages, and preserves unrelated
+  files and symbolic links.
+- The desktop USB installer previews an explicit contiguous week block and
+  ROAD or TRAIL selection before asking for confirmation.
+- Confirmed USB application regenerates the exact preview, revalidates Garmin
+  identity and device-bound SHA-256 ownership before each change, stages new
+  bytes, rolls back interrupted commits, and updates ownership metadata last.
+- USB installation never requests Garmin credentials and preserves unrelated
+  files. Missing previously owned workouts are treated as already consumed by
+  the device.
+- The full gate compiles the project and runs 111 passing unit tests using only
+  synthetic workout, filesystem, and MTP data. One symbolic-link safety test
+  skips when the Windows account cannot create symbolic links.
 - Physical Garmin-device compatibility remains explicitly unverified.
-- Issue #12's separate branch (`feature/12-forerunner-265-mtp-install`, PR #13)
-  holds the in-progress Windows MTP installation for the Forerunner 265; its
-  owner-run physical acceptance check still has a FAIL result, so that PR
-  remains open and unmerged. The main repository folder currently has that
-  branch checked out with uncommitted diagnosis work — leave it in place.
+- Approved issue #11 tracks the owner-run physical mass-storage validation and
+  is In Progress on the project board.
+- Approved issue #12 tracks safe Windows MTP workout installation for the
+  Forerunner 265 and is In Progress on the project board.
 
 ## This session
 
-- The owner reported the desktop app was hard to use: misaligned columns,
-  action buttons and the install section pushed off screen on a 1280x800
-  logical display, unreadable status messages, and no visible workflow.
-- Created issue #14 and rebuilt the window layout on
-  `feature/14-usable-editor` (from `master`, in a separate worktree at
-  `../marathon-planner-ui` so the issue #12 checkout stayed untouched).
-- Fixed alignment by giving the heading row and every workout row one shared
-  column plan; verified with before/after screenshots.
-- Fixed off-screen content: the app is now sharp on scaled Windows displays,
-  sizes the window to the real screen, scrolls the workout list, and keeps
-  the install section and a wrapping status bar always visible.
-- Added menus, keyboard shortcuts, week Previous/Next buttons, a plan summary,
-  a help dialog, and state-aware captions; safety behavior is unchanged (read-
-  only previews, explicit confirmation, no credential requests, no new
-  dependencies).
-- All 98 tests pass, including new tests for the shared column plan, plan
-  summary text, and week navigation guards.
+- Created `feature/12-forerunner-265-mtp-install` from fetched `master` and
+  moved issue #12 to In Progress before changing implementation files.
+- Added an immutable, bounded MTP transport/session protocol with separate
+  discovery, enumeration, property, create, write, commit, identity, readback,
+  and nonrecursive deletion boundaries.
+- Added an in-memory synthetic MTP object graph with connection/session
+  generations, deterministic transfer results, a call log, and before/after
+  fault injection at every transport boundary.
+- Added versioned ownership and forward-recovery journal records that validate
+  exact schemas, bounds, unique case-folded filenames, persistent ownership,
+  copy-before-cleanup ordering, and completed-copy identities.
+- Added a local state store that derives locally salted device bindings without
+  persisting raw binding inputs and atomically replaces ownership and journal
+  JSON after flushing staged bytes.
+- Kept raw transport and ownership identifiers out of record representations,
+  left `usb_install.py` unchanged, and added 20 synthetic tests for the new
+  boundaries and store; the full 112-test gate is green with one permission-
+  dependent symlink test skipped.
 
 ## Next
 
-1. Merge PR for issue #14 once checks are green, then close issue #14 and move
-   its card to Done.
-2. Rebase PR #13 (issue #12) onto the merged UI: re-add its MTP section as a
-   second install path inside the "Install on your Garmin watch" area and
-   restyle it to the new layout before continuing the physical-failure
-   diagnosis in STATUS history on that branch.
-3. Continue issue #12's read-only diagnosis of the repeatable physical write
-   failure with synthetic data only, preserving the active recovery state.
-4. Issue #11 (physical mass-storage validation) still awaits a mass-storage
-   Garmin device.
+1. Implement pure supported-device, destination, collision, consumed-object,
+   and ownership planning through the bounded protocol; preview must make no
+   mutating transport or local-state calls.
+2. Implement exact-preview comparison plus durable copy/readback/ownership-
+   before-cleanup application and forward recovery through the current journal.
+3. Add the lazily imported WPD adapter behind a fake low-level facade, then add
+   the separate Windows MTP UI path without changing mass-storage behavior.
+4. Run the full gate, review and hash-pin the Windows-only COM dependency, open
+   one PR, and keep the Forerunner 265 profile provisional.
+5. Owner-run issue #12's minimal synthetic physical-device acceptance check;
+   enable and document only the exact profile that passes before merge.
+6. When a mass-storage Garmin is available, resume issue #11's separate
+   physical validation.
 
 ## Blockers
 
-- Issue #11 needs an owner-provided mass-storage Garmin; the available
-  Forerunner 265 is MTP-only.
-- Issue #12's owner-run synthetic acceptance check has a repeatable FAIL; PR
-  #13 must not merge until a complete check passes.
+- The available owner-provided Forerunner 265 uses MTP and does not expose the
+  mounted filesystem required by the shipped mass-storage installer. A
+  mass-storage Garmin is required to complete issue #11.
+- Issue #12's physical compatibility cannot be confirmed until its planned MTP
+  implementation is complete and the owner-run synthetic device check passes.
