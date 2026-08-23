@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import date, timedelta
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -28,10 +30,12 @@ from marathon_planner.usb_install import (  # noqa: E402
     USB_MANIFEST_FORMAT,
     USB_MANIFEST_SCHEMA_VERSION,
     UsbInstallError,
+    apply_usb_install,
     detect_usb_workout_destination,
     format_usb_install_preview,
     preview_usb_install,
 )
+import marathon_planner.usb_install as usb_install_module  # noqa: E402
 
 
 DEVICE_NAMESPACE = "http://www.garmin.com/xmlschemas/GarminDevice/v2"
@@ -332,6 +336,270 @@ class OwnedRotationTests(UsbInstallTestCase):
         )
         with self.assertRaisesRegex(UsbInstallError, "non-finite number"):
             self.preview()
+
+
+class InstallApplicationTests(UsbInstallTestCase):
+    def temporary_artifacts(self) -> list[Path]:
+        return [
+            path
+            for path in self.device.rglob(".marathon-planner-*.tmp")
+            if path.is_file()
+        ]
+
+    def test_application_requires_explicit_confirmation_without_writing(self) -> None:
+        preview = self.preview()
+
+        with self.assertRaisesRegex(UsbInstallError, "explicit confirmation"):
+            apply_usb_install(self.plan, preview, confirmed=False)
+
+        self.assertEqual(list(self.new_files.iterdir()), [])
+        self.assertFalse(preview.destination.manifest_path.exists())
+
+    def test_confirmed_application_writes_exact_contract_manifest_last(self) -> None:
+        preview = self.preview(start_week=2, week_count=2, terrain=Terrain.TRAIL)
+        destinations: list[Path] = []
+        real_replace = os.replace
+
+        def recording_replace(source, destination) -> None:
+            destinations.append(Path(destination))
+            real_replace(source, destination)
+
+        with patch("marathon_planner.usb_install.os.replace", recording_replace):
+            result = apply_usb_install(self.plan, preview, confirmed=True)
+
+        manifest = json.loads(preview.destination.manifest_path.read_bytes())
+        self.assertEqual(result.change_count, len(preview.changes))
+        self.assertEqual(result.workout_count, 2)
+        self.assertEqual(destinations[-1], preview.destination.manifest_path)
+        self.assertEqual(
+            {entry["path"] for entry in manifest["files"]},
+            {
+                change.relative_path
+                for change in preview.changes
+                if change.action is InstallAction.COPY
+            },
+        )
+        for entry in manifest["files"]:
+            content = self.device.joinpath(*Path(entry["path"]).parts).read_bytes()
+            self.assertEqual(len(content), entry["bytes"])
+            self.assertEqual(sha256(content).hexdigest(), entry["sha256"])
+        self.assertEqual(self.temporary_artifacts(), [])
+
+    def test_exact_preview_is_rejected_after_device_or_collision_change(self) -> None:
+        preview = self.preview()
+        first_copy = next(
+            change
+            for change in preview.changes
+            if change.action is InstallAction.COPY
+        )
+        collision = self.device.joinpath(*Path(first_copy.relative_path).parts)
+        collision.write_bytes(b"unrelated local file")
+
+        with self.assertRaises(UsbInstallError):
+            apply_usb_install(self.plan, preview, confirmed=True)
+
+        self.assertEqual(collision.read_bytes(), b"unrelated local file")
+        self.assertFalse(preview.destination.manifest_path.exists())
+
+        collision.unlink()
+        (self.garmin / "GarminDevice.xml").write_text(
+            device_xml().replace("SYNTHETIC-DEVICE-001", "SYNTHETIC-DEVICE-002"),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(UsbInstallError, "no longer current"):
+            apply_usb_install(self.plan, preview, confirmed=True)
+
+    def test_collision_after_staging_rolls_back_without_adopting_file(self) -> None:
+        preview = self.preview()
+        first_copy = next(
+            change
+            for change in preview.changes
+            if change.action is InstallAction.COPY
+        )
+        collision = self.device.joinpath(*Path(first_copy.relative_path).parts)
+        real_stage = usb_install_module._stage_bytes
+        stage_count = 0
+
+        def stage_then_collide(parent: Path, content: bytes) -> Path:
+            nonlocal stage_count
+            staged = real_stage(parent, content)
+            stage_count += 1
+            if stage_count == len(preview.changes):
+                collision.write_bytes(b"appeared after confirmation")
+            return staged
+
+        with patch(
+            "marathon_planner.usb_install._stage_bytes",
+            stage_then_collide,
+        ):
+            with self.assertRaisesRegex(UsbInstallError, "file appeared"):
+                apply_usb_install(self.plan, preview, confirmed=True)
+
+        self.assertEqual(collision.read_bytes(), b"appeared after confirmation")
+        self.assertFalse(preview.destination.manifest_path.exists())
+        self.assertEqual(self.temporary_artifacts(), [])
+
+    def test_interrupted_initial_commit_removes_prior_copies_and_staging(self) -> None:
+        preview = self.preview()
+        copies = [
+            change for change in preview.changes if change.action is InstallAction.COPY
+        ]
+        interrupted_target = self.device.joinpath(*Path(copies[1].relative_path).parts)
+        real_replace = os.replace
+
+        def interrupt_second_copy(source, destination) -> None:
+            if Path(destination) == interrupted_target:
+                raise OSError("synthetic disconnect")
+            real_replace(source, destination)
+
+        with patch("marathon_planner.usb_install.os.replace", interrupt_second_copy):
+            with self.assertRaisesRegex(UsbInstallError, "rolled back"):
+                apply_usb_install(self.plan, preview, confirmed=True)
+
+        self.assertTrue(
+            all(
+                not self.device.joinpath(*Path(change.relative_path).parts).exists()
+                for change in copies
+            )
+        )
+        self.assertFalse(preview.destination.manifest_path.exists())
+        self.assertEqual(self.temporary_artifacts(), [])
+
+    def test_interrupted_rotation_restores_owned_files_and_unrelated_file(self) -> None:
+        first = self.preview()
+        apply_usb_install(self.plan, first, confirmed=True)
+        original_manifest = first.destination.manifest_path.read_bytes()
+        original_files = {
+            path.name: path.read_bytes() for path in self.new_files.iterdir()
+        }
+        unrelated = self.new_files / "coach-notes.fit"
+        unrelated.write_bytes(b"preserve this")
+        second = self.preview(start_week=2)
+        removals = [
+            change for change in second.changes if change.action is InstallAction.REMOVE
+        ]
+        interrupted_target = self.device.joinpath(
+            *Path(removals[1].relative_path).parts
+        )
+        real_replace = os.replace
+
+        def interrupt_second_removal(source, destination) -> None:
+            if Path(source) == interrupted_target:
+                raise OSError("synthetic disconnect")
+            real_replace(source, destination)
+
+        with patch(
+            "marathon_planner.usb_install.os.replace",
+            interrupt_second_removal,
+        ):
+            with self.assertRaisesRegex(UsbInstallError, "rolled back"):
+                apply_usb_install(self.plan, second, confirmed=True)
+
+        self.assertEqual(first.destination.manifest_path.read_bytes(), original_manifest)
+        self.assertEqual(unrelated.read_bytes(), b"preserve this")
+        for name, content in original_files.items():
+            self.assertEqual((self.new_files / name).read_bytes(), content)
+        self.assertEqual(self.temporary_artifacts(), [])
+
+    def test_interrupted_replacement_restores_verified_prior_bytes(self) -> None:
+        initial = self.preview()
+        document = json.loads(initial.manifest_content)
+        prior_content = b"synthetic prior application bytes"
+        prior_entry = document["files"][0]
+        prior_entry["bytes"] = len(prior_content)
+        prior_entry["sha256"] = sha256(prior_content).hexdigest()
+        document["files"] = [prior_entry]
+        prior_manifest = (
+            json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        target = self.device.joinpath(*Path(prior_entry["path"]).parts)
+        target.write_bytes(prior_content)
+        initial.destination.manifest_path.parent.mkdir()
+        initial.destination.manifest_path.write_bytes(prior_manifest)
+        replacement = self.preview()
+        self.assertTrue(
+            any(
+                change.action is InstallAction.REPLACE
+                for change in replacement.changes
+            )
+        )
+        real_replace = os.replace
+
+        def interrupt_replacement(source, destination) -> None:
+            if (
+                Path(destination) == target
+                and Path(source).name.startswith(".marathon-planner-stage-")
+            ):
+                raise OSError("synthetic disconnect")
+            real_replace(source, destination)
+
+        with patch(
+            "marathon_planner.usb_install.os.replace",
+            interrupt_replacement,
+        ):
+            with self.assertRaisesRegex(UsbInstallError, "rolled back"):
+                apply_usb_install(self.plan, replacement, confirmed=True)
+
+        self.assertEqual(target.read_bytes(), prior_content)
+        self.assertEqual(
+            initial.destination.manifest_path.read_bytes(),
+            prior_manifest,
+        )
+        self.assertEqual(self.temporary_artifacts(), [])
+
+    def test_manifest_tampering_after_staging_prevents_first_commit(self) -> None:
+        first = self.preview()
+        apply_usb_install(self.plan, first, confirmed=True)
+        second = self.preview(start_week=2)
+        original_files = {
+            path.name: path.read_bytes() for path in self.new_files.iterdir()
+        }
+        tampered_manifest = json.dumps(json.loads(first.manifest_content)).encode(
+            "utf-8"
+        )
+        real_stage = usb_install_module._stage_bytes
+        staged_change_count = sum(
+            change.action is not InstallAction.REMOVE
+            for change in second.changes
+        )
+        stage_count = 0
+
+        def stage_then_tamper(parent: Path, content: bytes) -> Path:
+            nonlocal stage_count
+            staged = real_stage(parent, content)
+            stage_count += 1
+            if stage_count == staged_change_count:
+                first.destination.manifest_path.write_bytes(tampered_manifest)
+            return staged
+
+        with patch(
+            "marathon_planner.usb_install._stage_bytes",
+            stage_then_tamper,
+        ):
+            with self.assertRaisesRegex(UsbInstallError, "manifest changed"):
+                apply_usb_install(self.plan, second, confirmed=True)
+
+        self.assertEqual(
+            first.destination.manifest_path.read_bytes(),
+            tampered_manifest,
+        )
+        for name, content in original_files.items():
+            self.assertEqual((self.new_files / name).read_bytes(), content)
+        self.assertEqual(self.temporary_artifacts(), [])
+
+    def test_rotation_revalidates_tampered_ownership_before_writing(self) -> None:
+        first = self.preview()
+        apply_usb_install(self.plan, first, confirmed=True)
+        second = self.preview(start_week=2)
+        manifest = json.loads(first.manifest_content)
+        owned = self.device.joinpath(*Path(manifest["files"][0]["path"]).parts)
+        owned.write_bytes(b"tampered after preview")
+
+        with self.assertRaises(UsbInstallError):
+            apply_usb_install(self.plan, second, confirmed=True)
+
+        self.assertEqual(owned.read_bytes(), b"tampered after preview")
+        self.assertEqual(first.destination.manifest_path.read_bytes(), first.manifest_content)
 
 
 if __name__ == "__main__":

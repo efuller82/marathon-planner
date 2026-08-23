@@ -30,45 +30,47 @@
 - Export validates member paths and generated filenames, writes atomically,
   replaces only recognized Marathon Planner packages, and preserves unrelated
   files and symbolic links.
-- The full gate on `master` compiles the project and runs 62 passing unit tests.
-- USB installation and physical Garmin-device compatibility are not live and
-  remain explicitly unverified.
+- The desktop USB installer previews an explicit contiguous week block and
+  ROAD or TRAIL selection before asking for confirmation.
+- Confirmed USB application regenerates the exact preview, revalidates Garmin
+  identity and device-bound SHA-256 ownership before each change, stages new
+  bytes, rolls back interrupted commits, and updates ownership metadata last.
+- USB installation never requests Garmin credentials and preserves unrelated
+  files. Missing previously owned workouts are treated as already consumed by
+  the device.
+- The full gate compiles the project and runs 92 passing unit tests using only
+  synthetic workout and filesystem data.
+- Physical Garmin-device compatibility remains explicitly unverified.
 
 ## This session
 
-- Started issue #5 from current `master` on
-  `feature/5-usb-workout-install` and moved its board card to In progress.
-- Added a preview-only USB installation contract for an explicit one-based
-  start week, contiguous week count, and ROAD or TRAIL selection.
-- Device detection now requires one bounded Garmin `GarminDevice.xml`, a valid
-  device ID, and one unambiguous existing `NewFiles` FIT destination; unsafe,
-  missing, symbolic-link, and malformed paths fail closed.
-- Defined device-bound ownership metadata with exact schema, safe relative FIT
-  paths, byte counts, and SHA-256 digests. Duplicate fields, non-finite values,
-  traversal, wrong-device manifests, unrelated collisions, and modified owned
-  files are rejected.
-- Dry runs list copies, verified replacements, verified removals, and ownership
-  metadata changes. Missing previously owned files are treated as already
-  consumed by the device; unrelated files are preserved.
-- Added desktop controls for start week, block size, terrain, device-root
-  selection, and a scrollable preview that states no files were changed.
-- Added synthetic-filesystem and headless desktop coverage. The feature-branch
-  gate compiles the project and runs 80 passing unit tests.
-- No USB mutation function exists yet, so this milestone cannot write, replace,
-  or remove any device file and never requests Garmin credentials.
+- Completed issue #5 application on `feature/5-usb-workout-install` without
+  changing the established dry-run contract.
+- Added a warning confirmation dialog that applies only the preview the user
+  saw; cancellation writes nothing, and stale plan/device/filesystem state
+  requires a new preview.
+- Staged FIT and manifest bytes on the destination filesystem before commit,
+  reserved verified rollback copies for replacements and removals, and made
+  the ownership manifest the final committed update.
+- Rechecked device identity, destination, prior manifest bytes, target absence,
+  and owned-file size/digest immediately before each applicable change.
+- Added rollback safeguards that refuse to overwrite or remove a file that
+  appeared or changed during recovery.
+- Added synthetic tests for confirmation, exact-preview expiry, post-staging
+  collisions and manifest tampering, manifest-last ordering, successful
+  application, and interrupted copy, replacement, and rotation recovery.
 
 ## Next
 
-1. On `feature/5-usb-workout-install`, implement confirmation-gated application
-   of the exact dry-run contract, revalidating device identity and ownership
-   immediately before each change.
-2. Make staged writes failure-safe, update the ownership manifest last, and add
-   synthetic interruption, collision, tampering, and unrelated-file tests.
-3. Open the issue's single pull request only after the full install acceptance
-   criteria are complete and the local gate remains green.
-4. Keep physical-device compatibility explicitly unverified until an owner-run
-   Garmin hardware test is available.
+1. On a physical Garmin mass-storage device, owner-run a small synthetic-plan
+   preview/install/consume/rotate check and record any compatibility defect in
+   a new approved issue before changing the unverified compatibility claim.
+2. If the hardware check succeeds, record the tested model and observed result
+   without including real runner plan data or device identifiers.
+3. Approve and add the next feature to the project board before starting
+   another feature branch; the current five-item backlog is otherwise complete.
 
 ## Blockers
 
-- None.
+- Physical-device compatibility requires an owner-provided Garmin device and
+  remains outside automated verification.

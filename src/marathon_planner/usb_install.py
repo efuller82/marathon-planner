@@ -1,10 +1,10 @@
-"""Fail-closed dry runs for account-free Garmin USB workout installation.
+"""Fail-closed account-free Garmin USB workout installation.
 
-The module deliberately plans changes without applying them. A device is
-accepted only when a bounded ``GarminDevice.xml`` identifies one existing
-``NewFiles`` FIT destination. Previous installs are owned through a
-device-bound manifest whose file paths, sizes, and SHA-256 digests must still
-match before a replacement or removal can be proposed.
+Every installation starts with an explicit dry-run contract. Application is
+confirmation-gated, regenerates that exact contract immediately before any
+write, stages new bytes before committing, and updates device-bound ownership
+metadata last. Only files whose paths, sizes, and SHA-256 digests are still
+verified against the prior manifest may be replaced or removed.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import tempfile
 from xml.etree import ElementTree
 
 from marathon_planner.fit_encoding import (
@@ -106,11 +107,37 @@ class UsbInstallPreview:
 
 
 @dataclass(frozen=True, slots=True)
+class UsbInstallResult:
+    """Summary of one successfully applied, previously previewed contract."""
+
+    destination: UsbWorkoutDestination
+    workout_count: int
+    change_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class _ManagedFile:
     relative_path: str
     size: int
     sha256: str
     content: bytes | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedInstall:
+    preview: UsbInstallPreview
+    desired: dict[str, _ManagedFile]
+    existing: dict[str, _ManagedFile]
+    existing_manifest_content: bytes | None
+
+
+@dataclass(frozen=True, slots=True)
+class _CommittedChange:
+    action: InstallAction
+    target: Path
+    backup: Path | None = None
+    committed: _ManagedFile | None = None
+    original: _ManagedFile | None = None
 
 
 def detect_usb_workout_destination(
@@ -164,6 +191,190 @@ def preview_usb_install(
 ) -> UsbInstallPreview:
     """Plan, but never apply, one explicit contiguous block installation."""
 
+    return _prepare_usb_install(
+        plan,
+        device_root,
+        start_week=start_week,
+        week_count=week_count,
+        terrain=terrain,
+    ).preview
+
+
+def apply_usb_install(
+    plan: TrainingPlan,
+    preview: UsbInstallPreview,
+    *,
+    confirmed: bool,
+) -> UsbInstallResult:
+    """Apply exactly one confirmed preview, failing closed if it has changed."""
+
+    if confirmed is not True:
+        raise UsbInstallError("USB installation requires explicit confirmation.")
+
+    prepared = _prepare_usb_install(
+        plan,
+        preview.destination.root,
+        start_week=preview.start_week,
+        week_count=preview.week_count,
+        terrain=preview.terrain,
+    )
+    if prepared.preview != preview:
+        raise UsbInstallError(
+            "The USB dry run is no longer current; preview the installation again."
+        )
+
+    if not preview.changes:
+        return UsbInstallResult(preview.destination, preview.workout_count, 0)
+
+    metadata_changes = {
+        InstallAction.CREATE_METADATA,
+        InstallAction.UPDATE_METADATA,
+    }
+    if any(
+        change.action in metadata_changes
+        for change in preview.changes[:-1]
+    ):
+        raise UsbInstallError("The USB dry-run contract has an unsafe change order.")
+
+    staged: dict[str, Path] = {}
+    created_manifest_directory = False
+    committed: list[_CommittedChange] = []
+    transaction_complete = False
+    try:
+        if any(change.action in metadata_changes for change in preview.changes):
+            manifest_directory = preview.destination.manifest_path.parent
+            if not manifest_directory.exists():
+                manifest_directory.mkdir()
+                created_manifest_directory = True
+            _require_directory(
+                manifest_directory,
+                "The Marathon Planner metadata folder",
+            )
+
+        for change in preview.changes:
+            if change.action is InstallAction.REMOVE:
+                continue
+            if change.action in metadata_changes:
+                content = preview.manifest_content
+                parent = preview.destination.manifest_path.parent
+            else:
+                desired = prepared.desired.get(change.relative_path)
+                if desired is None or desired.content is None:
+                    raise UsbInstallError(
+                        "The USB dry-run contract does not contain planned workout bytes."
+                    )
+                content = desired.content
+                parent = preview.destination.workout_directory
+            if len(content) != change.size or sha256(content).hexdigest() != change.sha256:
+                raise UsbInstallError(
+                    "The staged bytes no longer match the USB dry-run contract."
+                )
+            staged[change.relative_path] = _stage_bytes(parent, content)
+
+        for change in preview.changes:
+            _revalidate_change(prepared, change)
+            target = _change_path(preview.destination, change)
+            if change.action is InstallAction.COPY:
+                os.replace(staged[change.relative_path], target)
+                del staged[change.relative_path]
+                committed.append(
+                    _CommittedChange(
+                        change.action,
+                        target,
+                        committed=prepared.desired[change.relative_path],
+                    )
+                )
+            elif change.action is InstallAction.REPLACE:
+                original = _existing_entry(prepared, change.relative_path)
+                backup = _reserve_temporary_path(target.parent)
+                try:
+                    os.replace(target, backup)
+                except BaseException:
+                    _remove_temporary_file(backup)
+                    raise
+                committed.append(
+                    _CommittedChange(
+                        change.action,
+                        target,
+                        backup,
+                        prepared.desired[change.relative_path],
+                        original,
+                    )
+                )
+                os.replace(staged[change.relative_path], target)
+                del staged[change.relative_path]
+            elif change.action is InstallAction.REMOVE:
+                original = _existing_entry(prepared, change.relative_path)
+                backup = _reserve_temporary_path(target.parent)
+                try:
+                    os.replace(target, backup)
+                except BaseException:
+                    _remove_temporary_file(backup)
+                    raise
+                committed.append(
+                    _CommittedChange(
+                        change.action,
+                        target,
+                        backup,
+                        original=original,
+                    )
+                )
+            elif change.action in metadata_changes:
+                _verify_committed_fit_contract(prepared)
+                os.replace(staged[change.relative_path], target)
+                del staged[change.relative_path]
+                transaction_complete = True
+            else:  # pragma: no cover - guarded by the closed enum
+                raise UsbInstallError("The USB dry-run contract has an unknown action.")
+
+        if not transaction_complete:
+            _verify_committed_fit_contract(prepared)
+            _verify_final_manifest(prepared)
+            transaction_complete = True
+    except BaseException as error:
+        rollback_error = _rollback_changes(committed)
+        if rollback_error is not None:
+            raise UsbInstallError(
+                "USB installation failed and its staged changes could not be fully "
+                "rolled back. Reconnect the device and inspect it before retrying."
+            ) from rollback_error
+        if isinstance(error, UsbInstallError):
+            raise
+        if isinstance(error, OSError):
+            raise UsbInstallError(
+                "USB installation could not be completed; staged changes were "
+                "rolled back."
+            ) from error
+        raise
+    finally:
+        for path in staged.values():
+            _remove_temporary_file(path)
+        if transaction_complete:
+            for record in committed:
+                _remove_verified_backup(record)
+        if created_manifest_directory:
+            try:
+                preview.destination.manifest_path.parent.rmdir()
+            except OSError:
+                pass
+
+    return UsbInstallResult(
+        preview.destination,
+        preview.workout_count,
+        len(preview.changes),
+    )
+
+
+def _prepare_usb_install(
+    plan: TrainingPlan,
+    device_root: str | Path,
+    *,
+    start_week: int,
+    week_count: int,
+    terrain: Terrain | str,
+) -> _PreparedInstall:
+    """Build a preview together with the verified state needed to apply it."""
+
     _validate_block(plan, start_week=start_week, week_count=week_count)
     try:
         selected_terrain = Terrain(terrain)
@@ -214,14 +425,19 @@ def preview_usb_install(
             )
         )
 
-    return UsbInstallPreview(
-        destination=destination,
-        start_week=start_week,
-        week_count=week_count,
-        terrain=selected_terrain,
-        workout_count=len(selected),
-        changes=tuple(changes),
-        manifest_content=manifest_content,
+    return _PreparedInstall(
+        preview=UsbInstallPreview(
+            destination=destination,
+            start_week=start_week,
+            week_count=week_count,
+            terrain=selected_terrain,
+            workout_count=len(selected),
+            changes=tuple(changes),
+            manifest_content=manifest_content,
+        ),
+        desired=desired,
+        existing=existing,
+        existing_manifest_content=existing_manifest_content,
     )
 
 
@@ -250,11 +466,221 @@ def format_usb_install_preview(preview: UsbInstallPreview) -> str:
         lines.extend(
             (
                 "",
-                "A future install must require confirmation before these destructive "
-                "changes are applied.",
+                "These destructive changes require confirmation before they are "
+                "applied.",
             )
         )
     return "\n".join(lines)
+
+
+def _stage_bytes(parent: Path, content: bytes) -> Path:
+    descriptor: int | None = None
+    path: Path | None = None
+    try:
+        descriptor, raw_path = tempfile.mkstemp(
+            prefix=".marathon-planner-stage-",
+            suffix=".tmp",
+            dir=parent,
+        )
+        path = Path(raw_path)
+        with os.fdopen(descriptor, "wb") as destination:
+            descriptor = None
+            destination.write(content)
+            destination.flush()
+            os.fsync(destination.fileno())
+        return path
+    except OSError as error:
+        if path is not None:
+            _remove_temporary_file(path)
+        raise UsbInstallError("USB installation bytes could not be staged.") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _reserve_temporary_path(parent: Path) -> Path:
+    try:
+        descriptor, raw_path = tempfile.mkstemp(
+            prefix=".marathon-planner-backup-",
+            suffix=".tmp",
+            dir=parent,
+        )
+        os.close(descriptor)
+        return Path(raw_path)
+    except OSError as error:
+        raise UsbInstallError("USB rollback space could not be reserved.") from error
+
+
+def _change_path(
+    destination: UsbWorkoutDestination,
+    change: UsbInstallChange,
+) -> Path:
+    if change.action in {InstallAction.CREATE_METADATA, InstallAction.UPDATE_METADATA}:
+        expected = _relative_path(destination.root, destination.manifest_path)
+        if change.relative_path != expected:
+            raise UsbInstallError("The USB metadata change path is unsafe.")
+        return destination.manifest_path
+    _validate_managed_path(destination, change.relative_path)
+    return destination.root.joinpath(*PurePosixPath(change.relative_path).parts)
+
+
+def _revalidate_change(
+    prepared: _PreparedInstall,
+    change: UsbInstallChange,
+) -> None:
+    destination = prepared.preview.destination
+    detected = detect_usb_workout_destination(destination.root)
+    if detected != destination:
+        raise UsbInstallError(
+            "The Garmin device identity or workout destination changed after preview."
+        )
+    _managed, current_manifest = _read_manifest(detected)
+    if current_manifest != prepared.existing_manifest_content:
+        raise UsbInstallError(
+            "The Marathon Planner ownership manifest changed after preview."
+        )
+
+    target = _change_path(destination, change)
+    if change.action is InstallAction.COPY:
+        if target.is_symlink() or target.exists():
+            raise UsbInstallError(
+                f"A file appeared at the planned workout path: {change.relative_path}"
+            )
+        return
+    if change.action in {InstallAction.REPLACE, InstallAction.REMOVE}:
+        prior = _existing_entry(prepared, change.relative_path)
+        if target.is_symlink() or not target.exists():
+            raise UsbInstallError(
+                f"The planned owned workout changed after preview: "
+                f"{change.relative_path}"
+            )
+        digest = _file_sha256(
+            target,
+            expected_size=prior.size,
+            relative_path=change.relative_path,
+        )
+        if digest != prior.sha256:
+            raise UsbInstallError(
+                f"Managed workout digest no longer matches: {change.relative_path}"
+            )
+
+
+def _existing_entry(
+    prepared: _PreparedInstall,
+    relative_path: str,
+) -> _ManagedFile:
+    prior = next(
+        (
+            entry
+            for path, entry in prepared.existing.items()
+            if path.casefold() == relative_path.casefold()
+        ),
+        None,
+    )
+    if prior is None:
+        raise UsbInstallError(
+            f"The planned workout is no longer application-owned: {relative_path}"
+        )
+    return prior
+
+
+def _verify_committed_fit_contract(prepared: _PreparedInstall) -> None:
+    destination = prepared.preview.destination
+    detected = detect_usb_workout_destination(destination.root)
+    if detected != destination:
+        raise UsbInstallError(
+            "The Garmin device identity or workout destination changed during install."
+        )
+    for relative_path, entry in prepared.desired.items():
+        path = destination.root.joinpath(*PurePosixPath(relative_path).parts)
+        if path.is_symlink() or not path.exists():
+            raise UsbInstallError(
+                f"A staged workout was not committed safely: {relative_path}"
+            )
+        digest = _file_sha256(
+            path,
+            expected_size=entry.size,
+            relative_path=relative_path,
+        )
+        if digest != entry.sha256:
+            raise UsbInstallError(
+                f"A staged workout digest changed during install: {relative_path}"
+            )
+    desired_keys = {path.casefold() for path in prepared.desired}
+    for relative_path in prepared.existing:
+        if relative_path.casefold() in desired_keys:
+            continue
+        path = destination.root.joinpath(*PurePosixPath(relative_path).parts)
+        if path.exists() or path.is_symlink():
+            raise UsbInstallError(
+                f"An owned workout was not safely rotated: {relative_path}"
+            )
+
+
+def _verify_final_manifest(prepared: _PreparedInstall) -> None:
+    _managed, content = _read_manifest(prepared.preview.destination)
+    if content != prepared.preview.manifest_content:
+        raise UsbInstallError(
+            "The ownership manifest was not committed safely after the workouts."
+        )
+
+
+def _rollback_changes(changes: list[_CommittedChange]) -> Exception | None:
+    first_error: Exception | None = None
+    for change in reversed(changes):
+        try:
+            if change.action is InstallAction.COPY:
+                if not change.target.exists() and not change.target.is_symlink():
+                    continue
+                _verify_temporary_contract(change.target, change.committed)
+                change.target.unlink()
+            elif change.backup is not None and change.original is not None:
+                _verify_temporary_contract(change.backup, change.original)
+                if change.target.exists() or change.target.is_symlink():
+                    if change.action is InstallAction.REMOVE:
+                        raise UsbInstallError(
+                            "An unrelated file appeared while rolling back USB changes."
+                        )
+                    _verify_temporary_contract(change.target, change.committed)
+                os.replace(change.backup, change.target)
+        except (OSError, UsbInstallError) as error:
+            if first_error is None:
+                first_error = error
+    return first_error
+
+
+def _verify_temporary_contract(
+    path: Path,
+    expected: _ManagedFile | None,
+) -> None:
+    if expected is None or path.is_symlink() or not path.exists():
+        raise UsbInstallError("A staged USB rollback file could not be verified.")
+    digest = _file_sha256(
+        path,
+        expected_size=expected.size,
+        relative_path=expected.relative_path,
+    )
+    if digest != expected.sha256:
+        raise UsbInstallError("A staged USB rollback file digest changed.")
+
+
+def _remove_verified_backup(change: _CommittedChange) -> None:
+    if change.backup is None or change.original is None:
+        return
+    try:
+        _verify_temporary_contract(change.backup, change.original)
+        change.backup.unlink()
+    except (OSError, UsbInstallError):
+        pass
+
+
+def _remove_temporary_file(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
 
 
 def _validate_block(

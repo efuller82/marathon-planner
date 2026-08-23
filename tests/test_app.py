@@ -17,6 +17,7 @@ except ModuleNotFoundError:
     ttk_stub.Frame = type("Frame", (), {})
     tkinter_stub.ttk = ttk_stub
     tkinter_stub.filedialog = filedialog_stub
+    tkinter_stub.messagebox = ModuleType("tkinter.messagebox")
     sys.modules["tkinter"] = tkinter_stub
     sys.modules["tkinter.ttk"] = ttk_stub
     sys.modules["tkinter.filedialog"] = filedialog_stub
@@ -278,6 +279,80 @@ class WeeklyEditorActionTests(unittest.TestCase):
 
         self.assertIsNone(preview)
         self.assertIn("identity is ambiguous", app.status.value)
+
+    def test_confirmed_usb_preview_applies_exact_contract(self) -> None:
+        app = self.make_app()
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 1)),)
+        )
+        app._displayed_week_index = 0
+        preview = Mock()
+        result = Mock(
+            workout_count=1,
+            change_count=3,
+            destination=Mock(device_id="SYNTHETIC-DEVICE-001"),
+        )
+
+        with (
+            patch.object(app, "_store_visible_imported_week", return_value=True),
+            patch(
+                "marathon_planner.app.apply_usb_install",
+                return_value=result,
+            ) as apply,
+        ):
+            installed = app.install_usb_preview(preview, confirmed=True)
+
+        self.assertTrue(installed)
+        apply.assert_called_once_with(app.open_plan, preview, confirmed=True)
+        self.assertIn("Installed 1 workout", app.status.value)
+
+    def test_usb_application_error_is_reported_without_success(self) -> None:
+        app = self.make_app()
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 1)),)
+        )
+        app._displayed_week_index = 0
+
+        with (
+            patch.object(app, "_store_visible_imported_week", return_value=True),
+            patch(
+                "marathon_planner.app.apply_usb_install",
+                side_effect=UsbInstallError("preview is no longer current"),
+            ),
+        ):
+            installed = app.install_usb_preview(Mock(), confirmed=True)
+
+        self.assertFalse(installed)
+        self.assertIn("no longer current", app.status.value)
+
+    def test_usb_confirmation_decline_never_calls_application(self) -> None:
+        app = self.make_app()
+        preview = Mock(
+            start_week=2,
+            week_count=1,
+            terrain=Mock(value="TRAIL"),
+            workout_count=1,
+            changes=(Mock(), Mock()),
+            destination=Mock(device_id="SYNTHETIC-DEVICE-001"),
+        )
+        preview_window = Mock()
+
+        with (
+            patch(
+                "marathon_planner.app.messagebox.askyesno",
+                return_value=False,
+            ) as confirm,
+            patch.object(app, "install_usb_preview") as install,
+        ):
+            app._confirm_usb_install(preview, preview_window)
+
+        confirm.assert_called_once()
+        install.assert_not_called()
+        preview_window.destroy.assert_not_called()
+        self.assertEqual(
+            app.status.value,
+            "USB installation canceled; no files changed.",
+        )
 
 
 if __name__ == "__main__":

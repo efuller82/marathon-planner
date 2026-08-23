@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
 from marathon_planner.editor import GOAL_UNITS, build_week, parse_workout
@@ -19,6 +19,7 @@ from marathon_planner.plan_export import (
 from marathon_planner.usb_install import (
     UsbInstallError,
     UsbInstallPreview,
+    apply_usb_install,
     format_usb_install_preview,
     preview_usb_install as build_usb_install_preview,
 )
@@ -200,7 +201,7 @@ class MarathonPlannerApp(ttk.Frame):
         )
         controls.columnconfigure(4, weight=1)
 
-        usb_controls = ttk.LabelFrame(self, text="USB install dry run", padding=12)
+        usb_controls = ttk.LabelFrame(self, text="USB workout installation", padding=12)
         usb_controls.grid(row=4, column=0, sticky="ew", pady=(12, 0))
         ttk.Label(usb_controls, text="Start week").grid(row=0, column=0, sticky="w")
         self.usb_start_week = tk.StringVar(value="1")
@@ -238,7 +239,7 @@ class MarathonPlannerApp(ttk.Frame):
         ).grid(row=0, column=6, sticky="w")
         ttk.Label(
             usb_controls,
-            text="Preview only; no Garmin credentials or device files are changed.",
+            text="Preview first; installation never requests Garmin credentials.",
         ).grid(row=0, column=7, sticky="w", padx=(16, 0))
         usb_controls.columnconfigure(7, weight=1)
 
@@ -425,9 +426,76 @@ class MarathonPlannerApp(ttk.Frame):
         text.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
         text.insert("1.0", format_usb_install_preview(preview))
         text.configure(state="disabled")
-        ttk.Button(window, text="Close", command=window.destroy).grid(
-            row=2, column=0, sticky="e", padx=12, pady=12
+        buttons = ttk.Frame(window)
+        buttons.grid(row=2, column=0, sticky="e", padx=12, pady=12)
+        ttk.Button(buttons, text="Close", command=window.destroy).grid(
+            row=0, column=0, sticky="e"
         )
+        ttk.Button(
+            buttons,
+            text="Install exact preview…",
+            command=lambda: self._confirm_usb_install(preview, window),
+        ).grid(
+            row=0, column=1, sticky="e", padx=(8, 0)
+        )
+
+    def _confirm_usb_install(
+        self,
+        preview: UsbInstallPreview,
+        preview_window: tk.Toplevel,
+    ) -> None:
+        ending_week = preview.start_week + preview.week_count - 1
+        confirmed = messagebox.askyesno(
+            title="Confirm Garmin USB installation",
+            message=(
+                f"Install the exact preview on device "
+                f"{preview.destination.device_id}?\n\n"
+                f"Weeks {preview.start_week}–{ending_week}, "
+                f"{preview.terrain.value}, {preview.workout_count} workout(s), "
+                f"{len(preview.changes)} file change(s).\n\n"
+                "Only the listed Marathon Planner-owned files may be changed."
+            ),
+            icon="warning",
+            default="no",
+            parent=preview_window,
+        )
+        if not confirmed:
+            self.status.set("USB installation canceled; no files changed.")
+            return
+        if self.install_usb_preview(preview, confirmed=True):
+            preview_window.destroy()
+
+    def install_usb_preview(
+        self,
+        preview: UsbInstallPreview,
+        *,
+        confirmed: bool,
+    ) -> bool:
+        """Apply one explicitly confirmed preview after storing visible edits."""
+
+        if self.open_plan is None or self._displayed_week_index is None:
+            self.status.set(
+                "USB install not applied: import a dated JSON plan first."
+            )
+            return False
+        if not self._store_visible_imported_week():
+            self.status.set(f"USB install not applied: {self.status.get()}")
+            return False
+        try:
+            result = apply_usb_install(
+                self.open_plan,
+                preview,
+                confirmed=confirmed,
+            )
+        except UsbInstallError as error:
+            self.status.set(f"USB install not applied: {error}")
+            return False
+        self.status.set(
+            f"Installed {result.workout_count} workout(s) with "
+            f"{result.change_count} file change(s) on device "
+            f"{result.destination.device_id}."
+        )
+        return True
 
     def _replace_visible_workouts(
         self, workouts: tuple[WeeklyWorkout, ...]
