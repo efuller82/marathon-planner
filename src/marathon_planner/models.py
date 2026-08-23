@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from math import isfinite
 
 
 class GoalType(StrEnum):
@@ -22,8 +23,8 @@ class RunGoal:
     unit: str
 
     def __post_init__(self) -> None:
-        if self.value <= 0:
-            raise ValueError("Run goal value must be greater than zero.")
+        if not isfinite(self.value) or self.value <= 0:
+            raise ValueError("Run goal value must be a finite number greater than zero.")
 
         allowed_units = {
             GoalType.DISTANCE: {"mi", "km", "m"},
@@ -35,3 +36,36 @@ class RunGoal:
                 f"Unit {self.unit!r} is invalid for {self.goal_type.value}; "
                 f"expected one of: {valid}."
             )
+
+
+@dataclass(frozen=True, slots=True)
+class WeeklyWorkout:
+    """One user-authored workout with paired terrain choices."""
+
+    day: str
+    title: str
+    goal: RunGoal
+    road_choice: str
+    trail_choice: str
+
+    def __post_init__(self) -> None:
+        required_text = {
+            "day": self.day,
+            "title": self.title,
+            "ROAD choice": self.road_choice,
+            "TRAIL choice": self.trail_choice,
+        }
+        for label, value in required_text.items():
+            if not value.strip():
+                raise ValueError(f"Workout {label} must not be blank.")
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingWeek:
+    """An ordered collection of user-authored workouts."""
+
+    workouts: tuple[WeeklyWorkout, ...]
+
+    def __post_init__(self) -> None:
+        if not self.workouts:
+            raise ValueError("A training week must contain at least one workout.")

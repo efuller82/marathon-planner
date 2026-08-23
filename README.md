@@ -11,9 +11,10 @@ upcoming block without requiring the recipient's Garmin credentials.
 
 ## Current state
 
-The repository is bootstrapped with a runnable Tkinter shell and tested domain
-model for distance- and time-based run goals. Plan editing, FIT encoding, ZIP
-export, and watch installation are upcoming features.
+The repository includes a runnable Tkinter weekly editor with tested domain
+models for ordered workouts, distance- and time-based goals, and paired ROAD
+and TRAIL choices. Plan import, FIT encoding, ZIP export, and watch installation
+are upcoming features.
 
 ## Run locally
 
