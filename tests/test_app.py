@@ -341,6 +341,7 @@ class WeeklyEditorActionTests(unittest.TestCase):
             patch(
                 "marathon_planner.app.messagebox.askyesno",
                 return_value=False,
+                create=True,
             ) as confirm,
             patch.object(app, "install_usb_preview") as install,
         ):
