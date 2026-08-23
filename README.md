@@ -14,7 +14,8 @@ upcoming block without requiring the recipient's Garmin credentials.
 The repository includes a runnable Tkinter weekly editor with tested domain
 models for ordered workouts, distance- and time-based goals, and paired ROAD
 and TRAIL choices. The editor can import the versioned local JSON format below.
-FIT encoding, ZIP export, and watch installation are upcoming features.
+The core can also encode each dated workout as deterministic ROAD and TRAIL
+Garmin FIT variants. ZIP export and watch installation are upcoming features.
 
 ## Local JSON plan format
 
@@ -55,6 +56,18 @@ control characters. No field may refer to another file or path.
 `sec`, `min`, or `hr`. Values must be finite JSON numbers greater than zero.
 The app validates the complete document before replacing the open plan. Import
 stays local and does not log or upload plan contents.
+
+## FIT workout encoding
+
+Each workout produces one ROAD and one TRAIL `.fit` file. Both files contain
+the same authored distance or time goal; terrain and the matching authored
+choice appear in the workout and step labels. Stable plan positions plus a
+content digest make filenames and identifiers deterministic and collision-safe
+within a plan. Encoding uses an in-repository FIT protocol 2.0/profile 21.00
+writer and requires no account, network access, or third-party dependency.
+
+FIT structure and CRCs are parser-tested with synthetic plans. Compatibility
+with a physical Garmin device remains unverified.
 
 ## Run locally
 
