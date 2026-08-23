@@ -22,36 +22,44 @@
   protocol 2.0/profile 21.00 files without changing the authored goal.
 - FIT filenames, public workout identifiers, file numbers, timestamps, and
   bytes are stable and collision-safe within a plan.
-- The full local gate compiles the project and runs 44 passing unit tests.
+- The desktop app exports the complete open plan as one deterministic local ZIP
+  after validating and storing visible edits.
+- Package schema version 1 contains a hashed manifest, importable plan JSON,
+  authored-date iCalendar, local transfer instructions, and terrain-separated
+  FIT files.
+- Export validates member paths and generated filenames, writes atomically,
+  replaces only recognized Marathon Planner packages, and preserves unrelated
+  files and symbolic links.
+- The full local gate compiles the project and runs 62 passing unit tests.
 - CI is configured to run the same compilation and unit-test gate on pull
   requests.
 - Physical Garmin-device compatibility remains unverified.
 
 ## This session
 
-- Built issue #3 on `feature/3-fit-encoding` with an in-repository,
-  standard-library FIT writer and no runtime dependency.
-- Encoded Garmin-profile `file_id`, `workout`, and `workout_step` messages with
-  deterministic headers, definition records, timestamps, identifiers, and
-  checksums.
-- Converted every supported distance unit to FIT centimetres and every
-  supported time unit to FIT milliseconds using deterministic decimal
-  rounding.
-- Preserved the same goal across ROAD and TRAIL artifacts while identifying
-  the selected authored terrain choice in device-facing labels.
-- Added a synthetic FIT parser, CRC checks, round-trip assertions, stable-byte
-  golden coverage, collision cases, UTF-8 bounds, and failure paths.
-- Independently parsed a synthetic output with temporary, SHA-256-verified
-  `fitdecode` 0.11.0; it recognized all three messages and decoded the goal.
+- Built issue #4 on `feature/4-plan-package-export` with a standard-library ZIP
+  writer and desktop export action.
+- Fixed archive member order, timestamps, permissions, and storage so identical
+  plans produce identical ZIP bytes.
+- Added a versioned manifest with SHA-256 inventory plus a complete version 1
+  `plan.json` representation of the open user-authored plan.
+- Added RFC 5545 all-day calendar events on each authored workout date, mapped
+  to the matching ROAD and TRAIL FIT files without rescheduling.
+- Added concise in-package instructions for terrain selection and account-free
+  local USB transfer.
+- Added atomic destination writes and guarded replacement for positively
+  identified Marathon Planner packages only.
+- Added synthetic archive, calendar, FIT-content, path-safety, replacement, and
+  desktop-action coverage.
 
 ## Next
 
-1. Start issue #4 from current `master` on `feature/4-plan-package-export` and
-   define the deterministic ZIP layout.
-2. Export both FIT variants plus authored calendar material and concise local
-   transfer instructions without rescheduling workouts.
-3. Validate archive paths and replacement behavior with a synthetic package,
-   then open one pull request and merge only after the full gate is green.
+1. Start issue #5 from current `master` on `feature/5-usb-workout-install` and
+   define the dry-run installation contract for a user-selected upcoming block.
+2. Detect Garmin workout destinations conservatively and rotate only files
+   positively identified as Marathon Planner output.
+3. Keep physical-device compatibility explicitly unverified until an owner-run
+   hardware test is available.
 
 ## Blockers
 
