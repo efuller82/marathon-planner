@@ -15,7 +15,8 @@ The repository includes a runnable Tkinter weekly editor with tested domain
 models for ordered workouts, distance- and time-based goals, and paired ROAD
 and TRAIL choices. The editor can import the versioned local JSON format below.
 The core can also encode each dated workout as deterministic ROAD and TRAIL
-Garmin FIT variants. ZIP export and watch installation are upcoming features.
+Garmin FIT variants and export the complete open plan as one deterministic ZIP.
+Watch installation is an upcoming feature.
 
 ## Local JSON plan format
 
@@ -68,6 +69,33 @@ writer and requires no account, network access, or third-party dependency.
 
 FIT structure and CRCs are parser-tested with synthetic plans. Compatibility
 with a physical Garmin device remains unverified.
+
+## Plan package export
+
+After importing a dated plan, use **Export plan ZIP**. Visible edits are
+validated and stored before the entire open plan is exported. Package schema
+version 1 has this fixed layout:
+
+```text
+manifest.json
+plan.json
+calendar.ics
+README.txt
+workouts/ROAD/<deterministic FIT filename>
+workouts/TRAIL/<deterministic FIT filename>
+```
+
+`manifest.json` identifies the format and inventories every other member by
+path, byte count, and SHA-256 digest. `plan.json` preserves the complete plan in
+the importable version 1 format. `calendar.ics` creates one all-day event per
+workout on its authored date and maps that event to both FIT choices. The
+included instructions explain local variant selection and USB handoff without
+requesting Garmin credentials.
+
+Member order, timestamps, permissions, and storage are fixed, so an identical
+plan produces identical ZIP bytes. Archive paths and generated filenames are
+validated. Export can replace a recognized Marathon Planner package at the
+same destination, but refuses to overwrite unrelated files or symbolic links.
 
 ## Run locally
 

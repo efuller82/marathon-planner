@@ -11,6 +11,11 @@ from typing import Callable
 from marathon_planner.editor import GOAL_UNITS, build_week, parse_workout
 from marathon_planner.models import GoalType, TrainingPlan, TrainingWeek, WeeklyWorkout
 from marathon_planner.plan_import import PlanImportError, load_plan_file
+from marathon_planner.plan_export import (
+    PlanPackageExportError,
+    default_package_filename,
+    export_plan_package,
+)
 
 
 class WorkoutRowEditor(ttk.Frame):
@@ -176,13 +181,18 @@ class MarathonPlannerApp(ttk.Frame):
             text="Import JSON plan",
             command=self.choose_plan_file,
         ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Button(
+            controls,
+            text="Export plan ZIP",
+            command=self.choose_export_file,
+        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
         self.status = tk.StringVar(
             value="Enter each authored workout and its ROAD and TRAIL choices."
         )
         ttk.Label(controls, textvariable=self.status).grid(
-            row=0, column=3, sticky="w", padx=(16, 0)
+            row=0, column=4, sticky="w", padx=(16, 0)
         )
-        controls.columnconfigure(3, weight=1)
+        controls.columnconfigure(4, weight=1)
 
         self.add_workout()
 
@@ -241,6 +251,44 @@ class MarathonPlannerApp(ttk.Frame):
         workout_count = sum(len(week.workouts) for week in plan.weeks)
         self.status.set(
             f"Imported {len(plan.weeks)} week(s) and {workout_count} workout(s)."
+        )
+        return True
+
+    def choose_export_file(self) -> None:
+        """Ask for a local ZIP destination for the complete open plan."""
+
+        if self.open_plan is None:
+            self.status.set("Import a dated JSON plan before exporting.")
+            return
+        if not self._store_visible_imported_week():
+            self.status.set(f"Plan not exported: {self.status.get()}")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export Marathon Planner plan package",
+            defaultextension=".zip",
+            filetypes=(("ZIP plan package", "*.zip"),),
+            initialfile=default_package_filename(self.open_plan),
+        )
+        if path:
+            self.export_plan(path)
+
+    def export_plan(self, path: str | Path) -> bool:
+        """Validate visible edits, then export the complete open plan locally."""
+
+        if self.open_plan is None or self._displayed_week_index is None:
+            self.status.set("Plan not exported: import a dated JSON plan first.")
+            return False
+        if not self._store_visible_imported_week():
+            self.status.set(f"Plan not exported: {self.status.get()}")
+            return False
+        try:
+            destination = export_plan_package(self.open_plan, path)
+        except PlanPackageExportError as error:
+            self.status.set(f"Plan not exported: {error}")
+            return False
+        workout_count = sum(len(week.workouts) for week in self.open_plan.weeks)
+        self.status.set(
+            f"Exported {workout_count} workout(s) to {destination.name}."
         )
         return True
 
