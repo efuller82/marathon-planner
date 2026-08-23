@@ -23,10 +23,13 @@ from marathon_planner.mtp_transport import (
 )
 
 
+_AUTOMATIC_PERSISTENT_ID = object()
+
+
 @dataclass(slots=True)
 class _FakeObject:
     object_id: str
-    persistent_id: str
+    persistent_id: str | None
     parent_id: str
     name: str
     kind: MtpObjectKind
@@ -123,7 +126,7 @@ class FakeMtpTransport:
         kind: MtpObjectKind,
         data: bytes | None = None,
         object_id: str | None = None,
-        persistent_id: str | None = None,
+        persistent_id: str | None | object = _AUTOMATIC_PERSISTENT_ID,
     ) -> MtpObjectInfo:
         """Seed one synthetic object without recording a transport call."""
 
@@ -138,7 +141,11 @@ class FakeMtpTransport:
         elif data is not None:
             raise MtpProtocolError("Synthetic MTP containers cannot have content.")
         identifier = object_id or self._new_object_id(fake)
-        persistent = persistent_id or self._new_persistent_id(fake)
+        persistent = (
+            self._new_persistent_id(fake)
+            if persistent_id is _AUTOMATIC_PERSISTENT_ID
+            else persistent_id
+        )
         if identifier in fake.objects:
             raise MtpProtocolError("Synthetic MTP object IDs must be unique.")
         candidate = _FakeObject(
@@ -150,7 +157,9 @@ class FakeMtpTransport:
             data=data,
         )
         info = candidate.info()
-        if any(item.persistent_id == persistent for item in fake.objects.values()):
+        if persistent is not None and any(
+            item.persistent_id == persistent for item in fake.objects.values()
+        ):
             raise MtpProtocolError("Synthetic persistent object IDs must be unique.")
         fake.objects[identifier] = candidate
         return info

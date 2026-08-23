@@ -195,6 +195,12 @@ def validate_file_request(name: str, size: int) -> None:
     _validate_size(size, "MTP file size")
 
 
+def validate_object_name(value: str) -> None:
+    """Validate an object name used by a compatibility profile."""
+
+    _validate_name(value)
+
+
 def validate_identifier(value: str, label: str = "MTP identifier") -> None:
     """Validate an opaque identifier at a protocol implementation boundary."""
 

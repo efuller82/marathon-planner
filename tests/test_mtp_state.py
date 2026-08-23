@@ -26,6 +26,7 @@ from marathon_planner.mtp_state import (  # noqa: E402
     MtpJournalPhase,
     MtpOwnedObject,
     MtpOwnershipCatalog,
+    MtpPlanningState,
     MtpStateError,
     MtpStateStore,
 )
@@ -122,6 +123,10 @@ class MtpStateRecordTests(unittest.TestCase):
         with self.assertRaisesRegex(MtpStateError, "persistent and volatile"):
             replace(operation, completed=True)
 
+    def test_planning_state_requires_persisted_salt_for_existing_ownership(self) -> None:
+        with self.assertRaisesRegex(MtpStateError, "without a persisted"):
+            MtpPlanningState(catalog(), b"s" * 32, False)
+
 
 class MtpStateStoreTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -166,6 +171,51 @@ class MtpStateStoreTests(unittest.TestCase):
         persisted = b"".join(path.read_bytes() for path in self.root.iterdir())
         self.assertNotIn(raw_identifier.encode("ascii"), persisted)
         self.assertNotIn(b"RAW-SYNTHETIC-PERSISTENT-ID", persisted)
+
+        snapshot = self.store.read_planning_state()
+        self.assertTrue(snapshot.salt_persisted)
+        self.assertEqual(
+            snapshot.device_binding(
+                "synthetic-forerunner-265-v1",
+                (raw_identifier, b"RAW-SYNTHETIC-PERSISTENT-ID"),
+            ),
+            first,
+        )
+        self.assertNotIn(snapshot.binding_salt.hex(), repr(snapshot))
+
+    def test_initial_planning_state_is_ephemeral_and_does_not_create_files(self) -> None:
+        snapshot = self.store.read_planning_state()
+
+        self.assertEqual(snapshot.ownership, MtpOwnershipCatalog())
+        self.assertFalse(snapshot.salt_persisted)
+        self.assertEqual(len(snapshot.binding_salt), 32)
+        self.assertFalse(self.root.exists())
+
+    def test_preview_salt_is_persisted_exactly_and_mismatch_fails_closed(self) -> None:
+        preview_state = MtpPlanningState(MtpOwnershipCatalog(), b"p" * 32, False)
+
+        self.store.persist_planning_salt(preview_state)
+
+        self.assertEqual(self.store.salt_path.read_bytes(), b"p" * 32)
+        self.store.persist_planning_salt(
+            MtpPlanningState(MtpOwnershipCatalog(), b"p" * 32, True)
+        )
+        with self.assertRaisesRegex(MtpStateError, "no longer matches"):
+            self.store.persist_planning_salt(
+                MtpPlanningState(MtpOwnershipCatalog(), b"q" * 32, False)
+            )
+
+    def test_prepared_journal_never_overwrites_unresolved_transaction(self) -> None:
+        first = journal()
+        second = replace(first, transaction_id="synthetic-transaction-2")
+
+        self.store.prepare_journal(first)
+
+        with self.assertRaisesRegex(MtpStateError, "unresolved"):
+            self.store.prepare_journal(second)
+        with self.assertRaisesRegex(MtpStateError, "different"):
+            self.store.write_journal(second)
+        self.assertEqual(self.store.read_journal(), first)
 
     def test_atomic_replace_failure_preserves_prior_ownership_and_removes_temp(self) -> None:
         original = catalog()

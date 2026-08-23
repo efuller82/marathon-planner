@@ -107,6 +107,43 @@ class MtpOwnershipCatalog:
 
 
 @dataclass(frozen=True, slots=True)
+class MtpPlanningState:
+    """Immutable ownership and salt snapshot used by read-only planning."""
+
+    ownership: MtpOwnershipCatalog
+    binding_salt: bytes = field(repr=False)
+    salt_persisted: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.ownership, MtpOwnershipCatalog):
+            raise MtpStateError("MTP planning ownership snapshot is invalid.")
+        if (
+            not isinstance(self.binding_salt, bytes)
+            or len(self.binding_salt) != _SALT_BYTES
+        ):
+            raise MtpStateError("MTP planning binding salt is invalid.")
+        if type(self.salt_persisted) is not bool:
+            raise MtpStateError("MTP planning salt status is invalid.")
+        if self.ownership.devices and not self.salt_persisted:
+            raise MtpStateError(
+                "MTP ownership exists without a persisted binding salt."
+            )
+
+    def device_binding(
+        self,
+        profile_id: str,
+        stable_values: Iterable[str | bytes],
+    ) -> str:
+        """Derive a binding without reading or mutating local state."""
+
+        return derive_mtp_device_binding(
+            profile_id,
+            stable_values,
+            salt=self.binding_salt,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class MtpJournalOperation:
     """One copy or verified-owned removal and its durable progress."""
 
@@ -203,29 +240,26 @@ class MtpStateStore:
     ) -> str:
         """Return a local-salt HMAC without persisting raw stable identifiers."""
 
-        _validate_token(profile_id, "MTP compatibility profile")
-        values = tuple(stable_values)
-        if not 1 <= len(values) <= _MAX_BINDING_VALUES:
-            raise MtpStateError("MTP device binding input is outside bounds.")
-        message = bytearray(b"marathon-planner-mtp-binding-v1\0")
-        profile = profile_id.encode("ascii")
-        message.extend(len(profile).to_bytes(2, "big"))
-        message.extend(profile)
-        for value in values:
-            if isinstance(value, str):
-                try:
-                    encoded = value.encode("utf-8")
-                except UnicodeError as error:
-                    raise MtpStateError("MTP binding input is invalid text.") from error
-            elif isinstance(value, bytes):
-                encoded = value
-            else:
-                raise MtpStateError("MTP binding input must be text or bytes.")
-            if not 1 <= len(encoded) <= MAX_MTP_IDENTIFIER_BYTES:
-                raise MtpStateError("MTP device binding input is outside bounds.")
-            message.extend(len(encoded).to_bytes(2, "big"))
-            message.extend(encoded)
-        return hmac.new(self._read_or_create_salt(), message, sha256).hexdigest()
+        return derive_mtp_device_binding(
+            profile_id,
+            stable_values,
+            salt=self._read_or_create_salt(),
+        )
+
+    def read_planning_state(self) -> MtpPlanningState:
+        """Read an immutable preview snapshot without creating local files."""
+
+        ownership = self.read_ownership()
+        salt = self._read_optional(self.salt_path, "MTP binding salt", binary=True)
+        if salt is None:
+            if ownership.devices:
+                raise MtpStateError(
+                    "MTP ownership exists without its local binding salt."
+                )
+            return MtpPlanningState(ownership, secrets.token_bytes(_SALT_BYTES), False)
+        if len(salt) != _SALT_BYTES:
+            raise MtpStateError("The local MTP binding salt is corrupt.")
+        return MtpPlanningState(ownership, salt, True)
 
     def read_ownership(self) -> MtpOwnershipCatalog:
         """Read the ownership catalog, or return an empty catalog initially."""
@@ -235,6 +269,26 @@ class MtpStateStore:
             return MtpOwnershipCatalog()
         document = _parse_document(content, "MTP ownership state")
         return _ownership_from_document(document)
+
+    def persist_planning_salt(self, planning_state: MtpPlanningState) -> None:
+        """Persist or revalidate the exact salt used by a read-only preview."""
+
+        if not isinstance(planning_state, MtpPlanningState):
+            raise MtpStateError("MTP planning state snapshot is invalid.")
+        existing = self._read_optional(
+            self.salt_path,
+            "MTP binding salt",
+            binary=True,
+        )
+        if existing is None:
+            if planning_state.salt_persisted:
+                raise MtpStateError("The preview's persisted MTP salt is missing.")
+            self._atomic_write(self.salt_path, planning_state.binding_salt)
+            return
+        if len(existing) != _SALT_BYTES:
+            raise MtpStateError("The local MTP binding salt is corrupt.")
+        if not hmac.compare_digest(existing, planning_state.binding_salt):
+            raise MtpStateError("The MTP preview salt no longer matches local state.")
 
     def write_ownership(self, catalog: MtpOwnershipCatalog) -> None:
         """Atomically replace the complete ownership catalog."""
@@ -257,6 +311,20 @@ class MtpStateStore:
 
         if not isinstance(journal, MtpJournal):
             raise MtpStateError("MTP recovery journal type is invalid.")
+        current = self.read_journal()
+        if current is not None and current.transaction_id != journal.transaction_id:
+            raise MtpStateError("A different MTP recovery journal is present.")
+        self._atomic_write(self.journal_path, _journal_content(journal))
+
+    def prepare_journal(self, journal: MtpJournal) -> None:
+        """Durably create one PREPARED journal without replacing another."""
+
+        if not isinstance(journal, MtpJournal):
+            raise MtpStateError("MTP recovery journal type is invalid.")
+        if journal.phase is not MtpJournalPhase.PREPARED:
+            raise MtpStateError("A new MTP recovery journal must be PREPARED.")
+        if self.read_journal() is not None:
+            raise MtpStateError("An unresolved MTP recovery journal is present.")
         self._atomic_write(self.journal_path, _journal_content(journal))
 
     def clear_journal(self, transaction_id: str) -> None:
@@ -349,6 +417,41 @@ class MtpStateStore:
             raise MtpStateError("MTP local state directory could not be created.") from error
         if self.root.is_symlink() or not self.root.is_dir():
             raise MtpStateError("MTP local state directory is unsafe.")
+
+
+def derive_mtp_device_binding(
+    profile_id: str,
+    stable_values: Iterable[str | bytes],
+    *,
+    salt: bytes,
+) -> str:
+    """Purely derive a locally salted binding from bounded stable values."""
+
+    _validate_token(profile_id, "MTP compatibility profile")
+    if not isinstance(salt, bytes) or len(salt) != _SALT_BYTES:
+        raise MtpStateError("MTP binding salt is invalid.")
+    values = tuple(stable_values)
+    if not 1 <= len(values) <= _MAX_BINDING_VALUES:
+        raise MtpStateError("MTP device binding input is outside bounds.")
+    message = bytearray(b"marathon-planner-mtp-binding-v1\0")
+    profile = profile_id.encode("ascii")
+    message.extend(len(profile).to_bytes(2, "big"))
+    message.extend(profile)
+    for value in values:
+        if isinstance(value, str):
+            try:
+                encoded = value.encode("utf-8")
+            except UnicodeError as error:
+                raise MtpStateError("MTP binding input is invalid text.") from error
+        elif isinstance(value, bytes):
+            encoded = value
+        else:
+            raise MtpStateError("MTP binding input must be text or bytes.")
+        if not 1 <= len(encoded) <= MAX_MTP_IDENTIFIER_BYTES:
+            raise MtpStateError("MTP device binding input is outside bounds.")
+        message.extend(len(encoded).to_bytes(2, "big"))
+        message.extend(encoded)
+    return hmac.new(salt, message, sha256).hexdigest()
 
 
 def _ownership_content(catalog: MtpOwnershipCatalog) -> bytes:
