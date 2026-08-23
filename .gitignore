@@ -1,4 +1,19 @@
-# Extended for the chosen stack during bootstrap.
 .env
 .env.*
 .local/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+*.fit
+*.zip
+*.ics
+user-data/

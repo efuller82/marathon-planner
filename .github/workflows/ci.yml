@@ -1,8 +1,3 @@
-# PLACEHOLDER — replaced during bootstrap (see BOOTSTRAP.md, Phase 3 step 4)
-# with the project's real gate: lint, typecheck, test, build for the chosen
-# stack. Keep the bootstrap-guard job; it blocks PRs until initialization
-# is complete. Pin any external actions to commit SHAs.
-
 name: Pull request checks
 
 on:
@@ -20,23 +15,22 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Fail if the project is not initialized
+      - name: Confirm initialization
+        shell: bash
         run: |
-          if [ -f BOOTSTRAP.md ]; then
-            echo "BOOTSTRAP.md still exists: this project has not been initialized." >&2
-            echo "Run the bootstrap session before opening pull requests." >&2
-            exit 1
-          fi
-          if grep -rn '{{' AGENTS.md SECURITY.md; then
-            echo "Unfilled {{placeholders}} remain — bootstrap is incomplete." >&2
-            exit 1
-          fi
+          test ! -f BOOTSTRAP.md
+          ! grep -rn '{{' AGENTS.md SECURITY.md
 
   gate:
-    name: Project gate (not configured)
+    name: Project gate
     runs-on: ubuntu-latest
     needs: bootstrap-guard
     steps:
-      - name: Placeholder
-        run: |
-          echo "::warning::CI is not configured. Replace this job with the real gate during bootstrap."
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Compile application and tests
+        run: python -m compileall -q src tests run.py
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
