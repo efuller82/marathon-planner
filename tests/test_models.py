@@ -1,5 +1,6 @@
 """Tests for core user-authored plan values."""
 
+from datetime import date
 from pathlib import Path
 import sys
 import unittest
@@ -11,6 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from marathon_planner.models import (  # noqa: E402
     GoalType,
     RunGoal,
+    TrainingPlan,
     TrainingWeek,
     WeeklyWorkout,
 )
@@ -69,6 +71,13 @@ class TrainingWeekTests(unittest.TestCase):
     def test_week_requires_at_least_one_workout(self) -> None:
         with self.assertRaisesRegex(ValueError, "at least one"):
             TrainingWeek(())
+
+    def test_plan_requires_unique_dated_weeks(self) -> None:
+        workout = self.make_workout("2026-09-07", "Easy run")
+        week = TrainingWeek((workout,), start_date=date(2026, 9, 7))
+
+        with self.assertRaisesRegex(ValueError, "unique"):
+            TrainingPlan((week, week))
 
 
 if __name__ == "__main__":

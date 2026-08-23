@@ -8,37 +8,41 @@
   `https://github.com/efuller82/marathon-planner`.
 - The "Marathon Planner" GitHub project contains the approved feature backlog
   in priority order.
-- A local Tkinter weekly editor runs with `python run.py`; users can add and
-  remove ordered workout rows and validate each authored week.
+- A local Tkinter editor runs with `python run.py`; users can add and remove
+  ordered workout rows, validate authored weeks, and switch among imported
+  weeks.
 - The core model supports validated distance goals (`mi`, `km`, or `m`) and
   time goals (`sec`, `min`, or `hr`).
-- Each weekly workout preserves distinct ROAD and TRAIL choices under one
+- Each workout preserves distinct ROAD and TRAIL choices under one
   user-authored goal.
-- The full local gate compiles the project and runs 17 passing unit tests.
+- Version 1 local JSON plan import validates file type, size, exact schema,
+  duplicate fields, dates, bounds, and domain values before replacing the open
+  plan.
+- The full local gate compiles the project and runs 35 passing unit tests.
 - CI is configured to run the same compilation and unit-test gate on pull
   requests.
 
 ## This session
 
-- Renewed GitHub CLI authentication and the narrow GitHub Projects scopes.
-- Published the repository publicly, created the project board, and seeded
-  issues #1 through #5 for editing, safe import, FIT encoding, package export,
-  and USB installation.
-- Built issue #1 on `feature/1-weekly-plan-editor`: added ordered week/workout
-  models, form translation, paired choice validation, and the Tkinter row
-  editor.
-- Added headless domain/editor/UI-action tests and verified the actual Tkinter
-  widget flow with a withdrawn-window smoke test.
-- Tightened numeric validation so non-finite goals cannot enter a plan.
+- Built issue #2 on `feature/2-safe-plan-import` using only the Python standard
+  library.
+- Documented the exact version 1 JSON shape for dated weeks, goals, and ROAD and
+  TRAIL choices.
+- Added bounded UTF-8 file loading and fail-closed validation for untrusted
+  local files without logging plan contents.
+- Added atomic UI replacement, an imported-week selector, and preservation of
+  authored text, values, choices, and ordering.
+- Added synthetic import and failure-path coverage and completed a withdrawn
+  Tkinter end-to-end import smoke test.
 
 ## Next
 
-1. Start issue #2 from current `master` on
-   `feature/2-safe-plan-import` and define the versioned local JSON plan shape.
-2. Validate file type, size, schema, and values before atomically replacing the
-   open weekly plan.
-3. Add synthetic import tests, then open one pull request and merge only after
-   the full gate is green.
+1. Start issue #3 from current `master` on `feature/3-fit-encoding` and select a
+   zero-cost, pinned FIT encoding approach.
+2. Encode deterministic ROAD and TRAIL workout variants without changing the
+   authored goal.
+3. Add synthetic round-trip validation, then open one pull request and merge
+   only after the full gate is green.
 
 ## Blockers
 

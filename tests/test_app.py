@@ -12,10 +12,13 @@ try:
 except ModuleNotFoundError:
     tkinter_stub = ModuleType("tkinter")
     ttk_stub = ModuleType("tkinter.ttk")
+    filedialog_stub = ModuleType("tkinter.filedialog")
     ttk_stub.Frame = type("Frame", (), {})
     tkinter_stub.ttk = ttk_stub
+    tkinter_stub.filedialog = filedialog_stub
     sys.modules["tkinter"] = tkinter_stub
     sys.modules["tkinter.ttk"] = ttk_stub
+    sys.modules["tkinter.filedialog"] = filedialog_stub
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +30,7 @@ from marathon_planner.models import (  # noqa: E402
     RunGoal,
     WeeklyWorkout,
 )
+from marathon_planner.plan_import import PlanImportError  # noqa: E402
 
 
 class StatusStub:
@@ -43,6 +47,9 @@ class WeeklyEditorActionTests(unittest.TestCase):
         app.rows = []
         app.rows_frame = object()
         app.status = StatusStub()
+        app.open_plan = None
+        app._displayed_week_index = None
+        app.week_selector = Mock()
         return app
 
     def make_workout(self) -> WeeklyWorkout:
@@ -100,6 +107,22 @@ class WeeklyEditorActionTests(unittest.TestCase):
             app.status.value,
             "Fix workout 1: Goal value must be a number.",
         )
+
+    def test_invalid_import_does_not_replace_open_rows(self) -> None:
+        app = self.make_app()
+        existing_row = Mock()
+        app.rows = [existing_row]
+
+        with patch(
+            "marathon_planner.app.load_plan_file",
+            side_effect=PlanImportError("Unsupported plan schema_version."),
+        ):
+            imported = app.import_plan("synthetic.json")
+
+        self.assertFalse(imported)
+        self.assertEqual(app.rows, [existing_row])
+        existing_row.destroy.assert_not_called()
+        self.assertIn("Plan not imported", app.status.value)
 
 
 if __name__ == "__main__":

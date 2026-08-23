@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from enum import StrEnum
 from math import isfinite
 
@@ -65,7 +66,27 @@ class TrainingWeek:
     """An ordered collection of user-authored workouts."""
 
     workouts: tuple[WeeklyWorkout, ...]
+    start_date: date | None = None
 
     def __post_init__(self) -> None:
         if not self.workouts:
             raise ValueError("A training week must contain at least one workout.")
+        if self.start_date is not None and not isinstance(self.start_date, date):
+            raise ValueError("Training week start date must be a date.")
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingPlan:
+    """An ordered collection of dated weeks in a user-authored plan."""
+
+    weeks: tuple[TrainingWeek, ...]
+
+    def __post_init__(self) -> None:
+        if not self.weeks:
+            raise ValueError("A training plan must contain at least one week.")
+
+        start_dates = tuple(week.start_date for week in self.weeks)
+        if any(start_date is None for start_date in start_dates):
+            raise ValueError("Every plan week must have a start date.")
+        if len(set(start_dates)) != len(start_dates):
+            raise ValueError("Plan week start dates must be unique.")
