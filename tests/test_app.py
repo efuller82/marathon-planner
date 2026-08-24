@@ -26,7 +26,11 @@ except ModuleNotFoundError:
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from marathon_planner.app import MarathonPlannerApp  # noqa: E402
+from marathon_planner.app import (  # noqa: E402
+    MarathonPlannerApp,
+    WORKOUT_COLUMNS,
+    format_plan_summary,
+)
 from marathon_planner.models import (  # noqa: E402
     GoalType,
     RunGoal,
@@ -354,6 +358,117 @@ class WeeklyEditorActionTests(unittest.TestCase):
             app.status.value,
             "USB installation canceled; no files changed.",
         )
+
+
+class WorkoutColumnLayoutTests(unittest.TestCase):
+    def test_heading_and_row_share_one_column_plan(self) -> None:
+        headings = tuple(heading for heading, _minsize, _weight in WORKOUT_COLUMNS)
+        self.assertEqual(
+            headings,
+            ("Day", "Workout", "Goal", "Value", "Unit", "ROAD choice",
+             "TRAIL choice", ""),
+        )
+        for heading, minsize, weight in WORKOUT_COLUMNS:
+            self.assertGreater(minsize, 0, heading)
+            self.assertGreaterEqual(weight, 0, heading)
+
+
+class PlanSummaryTests(unittest.TestCase):
+    def test_summary_reports_weeks_workouts_and_start_date(self) -> None:
+        workout = WeeklyWorkout(
+            day="2030-04-02",
+            title="Synthetic run",
+            goal=RunGoal(GoalType.TIME, 30, "min"),
+            road_choice="Paved loop",
+            trail_choice="Wooded loop",
+        )
+        plan = TrainingPlan(
+            (
+                TrainingWeek((workout,), start_date=date(2030, 4, 1)),
+                TrainingWeek((workout, workout), start_date=date(2030, 4, 8)),
+            )
+        )
+
+        self.assertEqual(
+            format_plan_summary(plan),
+            "Open plan: 2 week(s), 3 workout(s), starting 2030-04-01.",
+        )
+
+
+class WeekNavigationTests(unittest.TestCase):
+    def make_app(self) -> MarathonPlannerApp:
+        app = object.__new__(MarathonPlannerApp)
+        app.rows = []
+        app.status = StatusStub()
+        app.open_plan = None
+        app._displayed_week_index = None
+        app.week_selector = Mock()
+        return app
+
+    def make_two_week_plan(self) -> TrainingPlan:
+        workout = WeeklyWorkout(
+            day="2030-04-02",
+            title="Synthetic run",
+            goal=RunGoal(GoalType.TIME, 30, "min"),
+            road_choice="Paved loop",
+            trail_choice="Wooded loop",
+        )
+        return TrainingPlan(
+            (
+                TrainingWeek((workout,), start_date=date(2030, 4, 1)),
+                TrainingWeek((workout,), start_date=date(2030, 4, 8)),
+            )
+        )
+
+    def test_step_week_does_nothing_without_an_open_plan(self) -> None:
+        app = self.make_app()
+
+        with patch.object(app, "_show_week") as show:
+            app._step_week(1)
+
+        show.assert_not_called()
+
+    def test_step_week_stays_inside_the_plan_bounds(self) -> None:
+        app = self.make_app()
+        app.open_plan = self.make_two_week_plan()
+        app._displayed_week_index = 1
+
+        with (
+            patch.object(app, "_store_visible_imported_week", return_value=True),
+            patch.object(app, "_show_week") as show,
+        ):
+            app._step_week(1)
+
+        show.assert_not_called()
+
+    def test_step_week_keeps_visible_edits_before_switching(self) -> None:
+        app = self.make_app()
+        app.open_plan = self.make_two_week_plan()
+        app._displayed_week_index = 0
+
+        with (
+            patch.object(
+                app, "_store_visible_imported_week", return_value=False
+            ) as store,
+            patch.object(app, "_show_week") as show,
+        ):
+            app._step_week(1)
+
+        store.assert_called_once_with()
+        show.assert_not_called()
+
+    def test_step_week_shows_the_adjacent_week(self) -> None:
+        app = self.make_app()
+        app.open_plan = self.make_two_week_plan()
+        app._displayed_week_index = 0
+
+        with (
+            patch.object(app, "_store_visible_imported_week", return_value=True),
+            patch.object(app, "_show_week") as show,
+        ):
+            app._step_week(1)
+
+        show.assert_called_once_with(1)
 
 
 if __name__ == "__main__":
