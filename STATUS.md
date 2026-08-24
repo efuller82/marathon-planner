@@ -76,6 +76,10 @@
   normal application imports and the synthetic gate remain dependency-free.
 - Ran the complete compile/unit gate: 176 tests ran, 175 passed, and the existing
   Windows symbolic-link permission test skipped.
+- The first pull-request run exposed Linux-only test setup assumptions: the CI
+  runner has no Tk package and is not Windows. Corrected the synthetic UI and
+  lazy-connector tests to supply those platform boundaries explicitly, then
+  reran the complete local gate with the same passing result.
 - Committed all remaining issue #12 branch work and opened its one pull request
   for CI and the owner-run physical acceptance check. The profile remains
   provisional and the pull request remains unmerged.

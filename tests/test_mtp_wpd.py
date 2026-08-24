@@ -464,6 +464,22 @@ class WpdLazyImportTests(unittest.TestCase):
     def test_application_and_mtp_imports_do_not_load_optional_com_modules(self) -> None:
         script = """
 import sys
+from types import ModuleType
+try:
+    import tkinter
+except ModuleNotFoundError:
+    tkinter = ModuleType('tkinter')
+    ttk = ModuleType('tkinter.ttk')
+    filedialog = ModuleType('tkinter.filedialog')
+    messagebox = ModuleType('tkinter.messagebox')
+    ttk.Frame = type('Frame', (), {})
+    tkinter.ttk = ttk
+    tkinter.filedialog = filedialog
+    tkinter.messagebox = messagebox
+    sys.modules['tkinter'] = tkinter
+    sys.modules['tkinter.ttk'] = ttk
+    sys.modules['tkinter.filedialog'] = filedialog
+    sys.modules['tkinter.messagebox'] = messagebox
 import marathon_planner
 import marathon_planner.app
 import marathon_planner.mtp_install
@@ -488,7 +504,13 @@ assert 'marathon_planner._wpd_comtypes' not in sys.modules
             (),
             {"create_wpd_facade": staticmethod(lambda: facade)},
         )
-        with patch("marathon_planner.mtp_wpd.import_module", return_value=fake_module) as load:
+        with (
+            patch("marathon_planner.mtp_wpd.sys.platform", "win32"),
+            patch(
+                "marathon_planner.mtp_wpd.import_module",
+                return_value=fake_module,
+            ) as load,
+        ):
             transport = WpdMtpTransport()
             load.assert_not_called()
 
@@ -500,9 +522,12 @@ assert 'marathon_planner._wpd_comtypes' not in sys.modules
             load.assert_called_once()
 
     def test_missing_optional_com_adapter_has_an_actionable_error(self) -> None:
-        with patch(
-            "marathon_planner.mtp_wpd.import_module",
-            side_effect=ImportError("synthetic missing dependency"),
+        with (
+            patch("marathon_planner.mtp_wpd.sys.platform", "win32"),
+            patch(
+                "marathon_planner.mtp_wpd.import_module",
+                side_effect=ImportError("synthetic missing dependency"),
+            ),
         ):
             with self.assertRaisesRegex(MtpError, "optional COM adapter"):
                 WpdMtpTransport().refresh_devices()
