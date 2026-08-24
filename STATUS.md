@@ -50,7 +50,7 @@
 - MTP local ownership and journal files default to local Windows application
   data. Preview does not create them; missing Windows/optional support disables
   only MTP with actionable status text.
-- The full gate compiles the project and runs 176 unit tests using only
+- The full gate compiles the project and runs 178 unit tests using only
   synthetic workout, filesystem, MTP, UI, and Windows-connector data. One
   symbolic-link safety test skips when the Windows account cannot create links.
 - Physical Garmin-device compatibility remains explicitly unverified.
@@ -62,45 +62,43 @@
 
 ## This session
 
-- Reviewed the complete issue #12 change against `origin/master`, including the
-  two earlier branch commits and all remaining Windows connector, desktop,
-  dependency, documentation, and synthetic-test work.
-- Confirmed the changes preserve the mounted-drive installer, keep device and
-  runner identifiers out of public output, reject stale or ambiguous device
-  state, verify copied bytes before ownership, and revalidate complete ownership
-  before any one-object cleanup.
-- Corrected the stale `SECURITY.md` known-gap entry: MTP ownership, rotation, and
-  recovery are implemented with synthetic coverage, while physical Forerunner
-  265 compatibility remains explicitly unverified.
-- Rechecked the reviewed `comtypes` 1.4.16 hash lock and lazy-loading boundary;
-  normal application imports and the synthetic gate remain dependency-free.
-- Ran the complete compile/unit gate: 176 tests ran, 175 passed, and the existing
+- Diagnosed issue #12's failed physical container check against Microsoft's
+  WPD object rules. Microsoft defines a folder by its content type and permits
+  `WPD_OBJECT_SIZE` when the folder exposes a resource, so container size
+  metadata is not evidence that the object is a file.
+- Narrowed the Windows adapter correction to accept only an exactly typed
+  unsigned container resource size, retain the exact storage/folder content
+  classification, and omit that resource size from the application-facing
+  file-content size field. Wrong property types still fail closed.
+- Added synthetic coverage for both storage and folder resource sizes and for
+  rejection of a wrongly typed container size.
+- Ran the complete compile/unit gate: 178 tests ran, 177 passed, and the existing
   Windows symbolic-link permission test skipped.
-- The first pull-request run exposed Linux-only test setup assumptions: the CI
-  runner has no Tk package and is not Windows. Corrected the synthetic UI and
-  lazy-connector tests to supply those platform boundaries explicitly, then
-  reran the complete local gate with the same passing result. Both replacement
-  GitHub pull-request checks passed.
-- Committed all remaining issue #12 branch work and opened its one pull request
-  for CI and the owner-run physical acceptance check. The profile remains
-  provisional and the pull request remains unmerged.
+- Repeated a metadata-only physical traversal on one exact Garmin Forerunner
+  265. It verified `Internal Storage/GARMIN/NewFiles` without opening device
+  content streams, writing, deleting, or recording identifiers or raw sizes.
+- Removed the one-shot local metadata helper. No local MTP ownership or recovery
+  state was created. The open PR and profile remain provisional until the full
+  synthetic workout acceptance check passes.
 
 ## Next
 
-1. Owner-run issue #12's minimal synthetic physical-device acceptance check from
-   the open pull request; do not use a real runner plan or record device IDs.
-2. Record only the Windows version family, model, topology shape without IDs,
-   and pass/fail on issue #12. Enable and document only the exact profile that
-   passes; keep it provisional if any check fails.
-3. Merge only after green pull-request checks and the owner check, then close
-   issue #12 and move its project card to Done.
-4. When a mass-storage Garmin is available, resume issue #11's separate
-   physical validation.
+1. Repeat the full owner-run synthetic physical check from PR #13: preview,
+   verified write, watch appearance/consumption, and missing-owned preview.
+2. Record only Windows version family, model, sanitized topology shape, and
+   pass/fail on issue #12; never record identifiers, ownership state, raw device
+   metadata, or real runner data.
+3. Merge only after every preview, verified write, watch
+   appearance/consumption, and missing-owned check passes and a new PASS record
+   is on issue #12.
+4. Close issue #12 and move its project card to Done only after the green PR
+   merges. Keep the profile provisional if any physical step fails.
 
 ## Blockers
 
 - The available owner-provided Forerunner 265 uses MTP and does not expose the
   mounted filesystem required by the shipped mass-storage installer. A
   mass-storage Garmin is required to complete issue #11.
-- Issue #12's physical compatibility cannot be confirmed until the owner-run
-  synthetic device check passes.
+- Issue #12's metadata-only physical traversal now passes, but compatibility
+  cannot be confirmed until the complete owner-run synthetic workout check
+  passes.

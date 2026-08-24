@@ -368,7 +368,9 @@ class WpdMtpSession:
         category = _optional_guid_property(
             properties, WpdPropertyKey.FUNCTIONAL_OBJECT_CATEGORY
         )
-        size = _optional_uint64_property(properties, WpdPropertyKey.OBJECT_SIZE)
+        reported_size = _optional_uint64_property(
+            properties, WpdPropertyKey.OBJECT_SIZE
+        )
 
         if content_type == WPD_CONTENT_TYPE_FUNCTIONAL_OBJECT:
             if category != WPD_FUNCTIONAL_CATEGORY_STORAGE:
@@ -383,17 +385,22 @@ class WpdMtpSession:
                 raise MtpProtocolError("A WPD file has an unexpected category.")
             kind = MtpObjectKind.FILE
         if kind is MtpObjectKind.FILE:
-            if size is None:
+            if reported_size is None:
                 raise MtpProtocolError("A WPD file has no typed content size.")
-        elif size is not None:
-            raise MtpProtocolError("A WPD container has a content size.")
+            content_size = reported_size
+        else:
+            # Microsoft permits folders and functional objects to expose
+            # resources and requires WPD_OBJECT_SIZE when they do.  That
+            # resource size does not make the object a file and is not a file
+            # content length for the application-facing transport contract.
+            content_size = None
         return MtpObjectInfo(
             object_id=returned_id,
             persistent_id=persistent,
             parent_id=parent,
             name=name,
             kind=kind,
-            size=size,
+            size=content_size,
         )
 
     def create_file(self, parent_object_id: str, name: str, size: int) -> str:

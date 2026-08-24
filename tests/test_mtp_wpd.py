@@ -283,6 +283,25 @@ class WpdAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(MtpProtocolError, "wrong type"):
             self.session.get_object_info("file")
 
+    def test_typed_container_resource_sizes_do_not_reclassify_containers(self) -> None:
+        for object_id, expected_kind in (
+            ("storage", MtpObjectKind.STORAGE),
+            ("folder", MtpObjectKind.FOLDER),
+        ):
+            with self.subTest(object_id=object_id):
+                self.facade.objects[object_id][WpdPropertyKey.OBJECT_SIZE] = _uint64(64)
+
+                info = self.session.get_object_info(object_id)
+
+                self.assertEqual(info.kind, expected_kind)
+                self.assertIsNone(info.size)
+
+    def test_container_resource_size_still_requires_exact_uint64_type(self) -> None:
+        self.facade.objects["folder"][WpdPropertyKey.OBJECT_SIZE] = _text("64")
+
+        with self.assertRaisesRegex(MtpProtocolError, "wrong type"):
+            self.session.get_object_info("folder")
+
     def test_enumeration_rejects_overflow_and_duplicate_object_ids(self) -> None:
         self.facade.children["folder"] = ("file", "other")
         with self.assertRaisesRegex(MtpProtocolError, "exceeded"):
