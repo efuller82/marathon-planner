@@ -53,52 +53,44 @@
 - The full gate compiles the project and runs 178 unit tests using only
   synthetic workout, filesystem, MTP, UI, and Windows-connector data. One
   symbolic-link safety test skips when the Windows account cannot create links.
-- Physical Garmin-device compatibility remains explicitly unverified.
+- Physical Garmin-device compatibility remains explicitly unverified. The full
+  owner-run issue #12 acceptance check currently has a FAIL result, so the
+  Forerunner 265 profile remains provisional.
 - Approved issue #11 tracks the owner-run physical mass-storage validation and
   is In Progress on the project board.
 - Approved issue #12 tracks safe Windows MTP workout installation for the
   Forerunner 265 and remains In Progress. Its single pull request is open but
-  must not merge until the owner-run synthetic watch check passes.
+  must not merge until a complete owner-run synthetic watch check passes.
 
 ## This session
 
-- Diagnosed issue #12's failed physical container check against Microsoft's
-  WPD object rules. Microsoft defines a folder by its content type and permits
-  `WPD_OBJECT_SIZE` when the folder exposes a resource, so container size
-  metadata is not evidence that the object is a file.
-- Narrowed the Windows adapter correction to accept only an exactly typed
-  unsigned container resource size, retain the exact storage/folder content
-  classification, and omit that resource size from the application-facing
-  file-content size field. Wrong property types still fail closed.
-- Added synthetic coverage for both storage and folder resource sizes and for
-  rejection of a wrongly typed container size.
-- Ran the complete compile/unit gate: 178 tests ran, 177 passed, and the existing
-  Windows symbolic-link permission test skipped.
-- Repeated a metadata-only physical traversal on one exact Garmin Forerunner
-  265. It verified `Internal Storage/GARMIN/NewFiles` without opening device
-  content streams, writing, deleting, or recording identifiers or raw sizes.
-- Removed the one-shot local metadata helper. No local MTP ownership or recovery
-  state was created. The open PR and profile remain provisional until the full
-  synthetic workout acceptance check passes.
+- Windows version family: Windows 10
+- Model: Forerunner 265
+- Sanitized topology shape: `Internal Storage/GARMIN/NewFiles`
+- Full owner-run synthetic acceptance result: FAIL
+- The provisional profile remains unverified. PR #13 remains open and unmerged.
+- Posted the same four-field sanitized result to issue #12. No identifiers,
+  ownership metadata, raw device metadata, or real runner data were recorded.
 
 ## Next
 
-1. Repeat the full owner-run synthetic physical check from PR #13: preview,
-   verified write, watch appearance/consumption, and missing-owned preview.
-2. Record only Windows version family, model, sanitized topology shape, and
-   pass/fail on issue #12; never record identifiers, ownership state, raw device
-   metadata, or real runner data.
-3. Merge only after every preview, verified write, watch
-   appearance/consumption, and missing-owned check passes and a new PASS record
-   is on issue #12.
+1. Owner: complete the application's local manual-review path for the failed
+   synthetic copy before any retry; preserve the recovery state until that
+   review is complete.
+2. After the owner confirms the manual review is complete, decide on issue #12
+   whether the physical failure needs a connector correction or a fresh full
+   acceptance run.
+3. Merge only after preview, verified write, watch appearance/consumption, and
+   missing-owned handling all pass and issue #12 has a new sanitized PASS
+   record.
 4. Close issue #12 and move its project card to Done only after the green PR
-   merges. Keep the profile provisional if any physical step fails.
+   merges. Keep the profile provisional while any physical step has not passed.
 
 ## Blockers
 
 - The available owner-provided Forerunner 265 uses MTP and does not expose the
   mounted filesystem required by the shipped mass-storage installer. A
   mass-storage Garmin is required to complete issue #11.
-- Issue #12's metadata-only physical traversal now passes, but compatibility
-  cannot be confirmed until the complete owner-run synthetic workout check
-  passes.
+- Issue #12's full owner-run synthetic check has a FAIL result. Owner manual
+  review is required before another attempt; compatibility cannot be confirmed
+  until a later complete check passes.
