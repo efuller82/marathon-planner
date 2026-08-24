@@ -274,6 +274,16 @@ class MtpStateStoreTests(unittest.TestCase):
         self.store.clear_journal(expected.transaction_id)
         self.assertIsNone(self.store.read_journal())
 
+    def test_clear_journal_wraps_filesystem_failure_for_forward_recovery(self) -> None:
+        expected = journal()
+        self.store.write_journal(expected)
+
+        with patch.object(Path, "unlink", side_effect=OSError("fail")):
+            with self.assertRaisesRegex(MtpStateError, "cleared durably"):
+                self.store.clear_journal(expected.transaction_id)
+
+        self.assertEqual(self.store.read_journal(), expected)
+
     def test_empty_store_has_no_ownership_and_no_journal(self) -> None:
         self.assertEqual(self.store.read_ownership(), MtpOwnershipCatalog())
         self.assertIsNone(self.store.read_journal())

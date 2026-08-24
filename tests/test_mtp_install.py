@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from hashlib import sha256
 from pathlib import Path
 import sys
@@ -20,10 +21,18 @@ from marathon_planner.mtp_install import (  # noqa: E402
     MtpInstallAction,
     MtpInstallError,
     apply_mtp_install,
+    build_mtp_desired_objects,
     format_mtp_install_preview,
     preview_mtp_install,
     recover_mtp_install,
     select_supported_mtp_session,
+)
+from marathon_planner.models import (  # noqa: E402
+    GoalType,
+    RunGoal,
+    TrainingPlan,
+    TrainingWeek,
+    WeeklyWorkout,
 )
 from marathon_planner.mtp_state import (  # noqa: E402
     MtpDeviceOwnership,
@@ -78,6 +87,49 @@ class MtpInstallPlanningTests(unittest.TestCase):
             kind=MtpObjectKind.FOLDER,
             persistent_id="persistent-newfiles",
         )
+
+    def test_mtp_desired_builder_selects_only_exact_week_block_and_terrain(
+        self,
+    ) -> None:
+        first = WeeklyWorkout(
+            day="2030-04-02",
+            title="Synthetic first run",
+            goal=RunGoal(GoalType.DISTANCE, 5, "mi"),
+            road_choice="Synthetic paved loop",
+            trail_choice="Synthetic wooded loop",
+        )
+        second = WeeklyWorkout(
+            day="2030-04-09",
+            title="Synthetic second run",
+            goal=RunGoal(GoalType.TIME, 30, "min"),
+            road_choice="Synthetic road out-and-back",
+            trail_choice="Synthetic trail out-and-back",
+        )
+        plan = TrainingPlan(
+            (
+                TrainingWeek((first,), start_date=date(2030, 4, 1)),
+                TrainingWeek((second,), start_date=date(2030, 4, 8)),
+            )
+        )
+
+        desired = build_mtp_desired_objects(
+            plan,
+            start_week=2,
+            week_count=1,
+            terrain="TRAIL",
+        )
+
+        self.assertEqual(len(desired), 1)
+        self.assertIn("-w002-", desired[0].filename)
+        self.assertIn("-trail-", desired[0].filename)
+
+        with self.assertRaisesRegex(MtpInstallError, "extends past"):
+            build_mtp_desired_objects(
+                plan,
+                start_week=2,
+                week_count=2,
+                terrain="ROAD",
+            )
 
     def preview(
         self,
@@ -162,6 +214,7 @@ class MtpInstallPlanningTests(unittest.TestCase):
             )
         )
         rendered = repr(preview) + format_mtp_install_preview(preview)
+        self.assertIn("Internal Storage/GARMIN/NewFiles", rendered)
         self.assertNotIn(self.device.device_ref, rendered)
         self.assertNotIn("persistent-newfiles", rendered)
         self.assertNotIn(BINDING, rendered)

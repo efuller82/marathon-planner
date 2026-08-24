@@ -32,5 +32,6 @@ owner's explicit approval and a documented issue decision before implementation.
 ## Known gaps
 
 - FIT generation has not yet been validated on physical Garmin hardware.
-- Safe identification and rotation of application-owned workouts on an MTP
-  device has not yet been implemented or independently tested.
+- MTP identification, application-owned workout rotation, and interrupted-copy
+  recovery have only synthetic coverage. The provisional Forerunner 265 profile
+  has not yet passed the owner-run physical-device check required by issue #12.

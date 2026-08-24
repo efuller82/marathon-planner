@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import date
+import os
 from pathlib import Path
 import sys
 import tkinter as tk
@@ -11,6 +13,22 @@ from typing import Callable
 
 from marathon_planner.editor import GOAL_UNITS, build_week, parse_workout
 from marathon_planner.models import GoalType, TrainingPlan, TrainingWeek, WeeklyWorkout
+from marathon_planner.mtp_install import (
+    FORERUNNER_265_PROVISIONAL_PROFILE,
+    MtpDesiredObject,
+    MtpInstallAction,
+    MtpInstallError,
+    MtpInstallPreview,
+    MtpInstallResult,
+    apply_mtp_install,
+    build_mtp_desired_objects,
+    format_mtp_install_preview,
+    preview_mtp_install as build_mtp_install_preview,
+    recover_mtp_install,
+)
+from marathon_planner.mtp_state import MtpStateError, MtpStateStore
+from marathon_planner.mtp_transport import MtpError, MtpTransport
+from marathon_planner.mtp_wpd import WpdMtpTransport
 from marathon_planner.plan_import import PlanImportError, load_plan_file
 from marathon_planner.plan_export import (
     PlanPackageExportError,
@@ -44,8 +62,9 @@ INSTALL_CAPTION_NO_PLAN = (
 )
 
 INSTALL_CAPTION_READY = (
-    "Connect your watch over USB, choose the weeks and terrain, then "
-    "preview. " + _INSTALL_SAFETY_TEXT
+    "Choose the weeks and terrain, then preview: watches that appear as a "
+    "USB drive use the USB preview, and a Forerunner 265 uses its own "
+    "Windows preview below. " + _INSTALL_SAFETY_TEXT
 )
 
 HELP_TEXT = """\
@@ -69,6 +88,11 @@ week, the number of weeks, and ROAD or TRAIL, then choose "Preview USB \
 install". A read-only preview always opens first, and nothing is written \
 until you confirm that exact preview.
 
+6. A Forerunner 265 does not appear as a USB drive. On Windows, use \
+"Preview connected Forerunner 265" in the same section with the same \
+weeks and terrain. If an installation is interrupted, reconnect the same \
+watch and choose "Recover interrupted installation" to finish it safely.
+
 Your plan stays on this computer. Marathon Planner never asks for your \
 Garmin username or password, and it only ever replaces workout files it \
 created itself."""
@@ -88,6 +112,47 @@ WORKOUT_COLUMNS: tuple[tuple[str, int, int], ...] = (
 )
 
 _COLUMN_GAP = 8
+
+
+MtpTransportFactory = Callable[[], MtpTransport]
+MtpStateFactory = Callable[[], MtpStateStore]
+
+
+@dataclass(frozen=True, slots=True)
+class MtpUiInstallPreview:
+    """One displayed selection bound to its exact live MTP dry run."""
+
+    install: MtpInstallPreview
+    start_week: int
+    week_count: int
+    terrain: str
+    desired: tuple[MtpDesiredObject, ...] = field(repr=False)
+    state_store: MtpStateStore = field(repr=False, compare=False)
+
+
+def default_mtp_state_store() -> MtpStateStore:
+    """Return the local-only Windows state location for MTP ownership."""
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        raise MtpStateError(
+            "The Windows local application-data directory is unavailable."
+        )
+    return MtpStateStore(Path(local_app_data) / "MarathonPlanner" / "mtp")
+
+
+def format_mtp_ui_preview(preview: MtpUiInstallPreview) -> str:
+    """Render the exact plan selection above the sanitized MTP dry run."""
+
+    ending_week = preview.start_week + preview.week_count - 1
+    return "\n".join(
+        (
+            f"Block: week {preview.start_week} through {ending_week}",
+            f"Terrain: {preview.terrain}",
+            "",
+            format_mtp_install_preview(preview.install),
+        )
+    )
 
 
 def _ui_scale(widget: tk.Misc) -> float:
@@ -298,7 +363,13 @@ class WorkoutListView(ttk.Frame):
 class MarathonPlannerApp(ttk.Frame):
     """Local weekly plan editor."""
 
-    def __init__(self, master: tk.Misc) -> None:
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        mtp_transport_factory: MtpTransportFactory | None = None,
+        mtp_state_factory: MtpStateFactory | None = None,
+    ) -> None:
         super().__init__(master, padding=(16, 12, 16, 0))
         self.grid(sticky="nsew")
         master.rowconfigure(0, weight=1)
@@ -308,6 +379,8 @@ class MarathonPlannerApp(ttk.Frame):
         self.rows: list[WorkoutRowEditor] = []
         self.open_plan: TrainingPlan | None = None
         self._displayed_week_index: int | None = None
+        self._mtp_transport_factory = mtp_transport_factory or WpdMtpTransport
+        self._mtp_state_factory = mtp_state_factory or default_mtp_state_store
 
         _init_app_styles(self)
         self._build_menu(master)
@@ -395,7 +468,7 @@ class MarathonPlannerApp(ttk.Frame):
         self.rows_frame = self.workout_list.interior
 
         install = ttk.LabelFrame(
-            self, text="Install on your Garmin watch (USB)", padding=12
+            self, text="Install on your Garmin watch", padding=12
         )
         install.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         install.columnconfigure(0, weight=1)
@@ -439,6 +512,27 @@ class MarathonPlannerApp(ttk.Frame):
         )
         self.usb_preview_button.grid(row=0, column=6, sticky="w")
 
+        mtp_path = ttk.Frame(install)
+        mtp_path.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(
+            mtp_path,
+            text="Forerunner 265 (Windows, provisional)",
+        ).grid(row=0, column=0, sticky="w")
+        self.mtp_preview_button = ttk.Button(
+            mtp_path,
+            text="Preview connected Forerunner 265…",
+            command=self.choose_mtp_device,
+            state="disabled",
+        )
+        self.mtp_preview_button.grid(row=0, column=1, sticky="w", padx=(6, 0))
+        self.mtp_recover_button = ttk.Button(
+            mtp_path,
+            text="Recover interrupted installation…",
+            command=self.recover_mtp_selection,
+            state="disabled",
+        )
+        self.mtp_recover_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+
         self.install_caption = tk.StringVar(value=INSTALL_CAPTION_NO_PLAN)
         safety_caption = ttk.Label(
             install,
@@ -446,7 +540,7 @@ class MarathonPlannerApp(ttk.Frame):
             style="Caption.TLabel",
             justify="left",
         )
-        safety_caption.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        safety_caption.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         _wrap_to_container(install, safety_caption, 28)
 
         status_bar = ttk.Frame(self)
@@ -577,6 +671,8 @@ class MarathonPlannerApp(ttk.Frame):
     def _enable_plan_actions(self) -> None:
         self.export_button.state(["!disabled"])
         self.usb_preview_button.state(["!disabled"])
+        self.mtp_preview_button.state(["!disabled"])
+        self.mtp_recover_button.state(["!disabled"])
         self.install_caption.set(INSTALL_CAPTION_READY)
         self._update_week_navigation()
 
@@ -786,6 +882,308 @@ class MarathonPlannerApp(ttk.Frame):
             f"{result.destination.device_id}."
         )
         return True
+
+    def choose_mtp_device(self) -> None:
+        """Discover the supported Windows MTP device and show a dry run."""
+
+        preview = self.preview_mtp_selection(
+            start_week=self.usb_start_week.get(),
+            week_count=self.usb_week_count.get(),
+            terrain=self.usb_terrain.get(),
+        )
+        if preview is not None:
+            self._show_mtp_install_preview(preview)
+
+    def preview_mtp_selection(
+        self,
+        *,
+        start_week: int | str,
+        week_count: int | str,
+        terrain: str,
+    ) -> MtpUiInstallPreview | None:
+        """Build a read-only Windows MTP preview through injected factories."""
+
+        selection = self._prepare_mtp_selection(
+            "previewed",
+            start_week=start_week,
+            week_count=week_count,
+            terrain=terrain,
+        )
+        if selection is None:
+            return None
+        parsed_start_week, parsed_week_count, desired = selection
+        try:
+            state_store = self._mtp_state_factory()
+            if state_store.read_journal() is not None:
+                self.status.set(
+                    "MTP recovery required: an interrupted installation is safely "
+                    "journaled. Reconnect the same device, select the same week "
+                    "block and terrain, then choose Recover interrupted installation."
+                )
+                return None
+            transport = self._mtp_transport_factory()
+            install = build_mtp_install_preview(
+                transport,
+                FORERUNNER_265_PROVISIONAL_PROFILE,
+                planning_state=state_store.read_planning_state(),
+                desired=desired,
+            )
+        except (MtpError, MtpInstallError, MtpStateError) as error:
+            self._set_mtp_error("previewed", error)
+            return None
+        preview = MtpUiInstallPreview(
+            install=install,
+            start_week=parsed_start_week,
+            week_count=parsed_week_count,
+            terrain=terrain,
+            desired=desired,
+            state_store=state_store,
+        )
+        self.status.set(
+            f"MTP dry run: {len(install.changes)} planned object change(s) for "
+            f"{install.workout_count} workout(s); no device or local-state "
+            "objects changed."
+        )
+        return preview
+
+    def _show_mtp_install_preview(self, preview: MtpUiInstallPreview) -> None:
+        window = tk.Toplevel(self)
+        window.title("Windows MTP installation dry run")
+        window.minsize(760, 420)
+        window.rowconfigure(0, weight=1)
+        window.columnconfigure(0, weight=1)
+        text = tk.Text(
+            window, wrap="none", padx=12, pady=12, font=("Consolas", 10)
+        )
+        text.grid(row=0, column=0, sticky="nsew")
+        vertical = ttk.Scrollbar(window, orient="vertical", command=text.yview)
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(window, orient="horizontal", command=text.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        text.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        text.insert("1.0", format_mtp_ui_preview(preview))
+        text.configure(state="disabled")
+        buttons = ttk.Frame(window)
+        buttons.grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=12)
+        buttons.columnconfigure(0, weight=1)
+
+        def close_preview() -> None:
+            self._close_mtp_preview(preview)
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", close_preview)
+        ttk.Label(
+            buttons,
+            text="This is a read-only preview; nothing has been written yet.",
+            style="Caption.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(buttons, text="Close", command=close_preview).grid(
+            row=0, column=1, sticky="e"
+        )
+        ttk.Button(
+            buttons,
+            text="Install exact dry run…",
+            command=lambda: self._confirm_mtp_install(preview, window),
+        ).grid(row=0, column=2, sticky="e", padx=(8, 0))
+
+    def _confirm_mtp_install(
+        self,
+        preview: MtpUiInstallPreview,
+        preview_window: tk.Toplevel,
+    ) -> None:
+        install = preview.install
+        ending_week = preview.start_week + preview.week_count - 1
+        copy_count = sum(
+            change.action is MtpInstallAction.COPY for change in install.changes
+        )
+        removal_count = sum(
+            change.action is MtpInstallAction.REMOVE_OWNED
+            for change in install.changes
+        )
+        confirmed = messagebox.askyesno(
+            title="Confirm exact Windows MTP dry run",
+            message=(
+                "Install exactly the dry run currently displayed?\n\n"
+                f"Device: {install.manufacturer} {install.model}\n"
+                f"Destination: {install.destination}\n"
+                f"Weeks {preview.start_week}–{ending_week}, {preview.terrain}, "
+                f"{install.workout_count} workout(s).\n"
+                f"COPY: {copy_count}; REMOVE OWNED: {removal_count}.\n\n"
+                "The dry run will be reconstructed before writes. Only objects "
+                "with complete Marathon Planner ownership proof may be removed."
+            ),
+            icon="warning",
+            default="no",
+            parent=preview_window,
+        )
+        if not confirmed:
+            self.status.set(
+                "Windows MTP installation canceled; no device or local-state "
+                "objects changed."
+            )
+            return
+        self.install_mtp_preview(preview, confirmed=True)
+        self._close_mtp_preview(preview)
+        preview_window.destroy()
+
+    def install_mtp_preview(
+        self,
+        preview: MtpUiInstallPreview,
+        *,
+        confirmed: bool,
+    ) -> bool:
+        """Apply the exact displayed MTP preview or fail closed as stale."""
+
+        if self.open_plan is None or self._displayed_week_index is None:
+            self.status.set(
+                "MTP install not applied: import a dated JSON plan first."
+            )
+            return False
+        if not self._store_visible_imported_week():
+            self.status.set(f"MTP install not applied: {self.status.get()}")
+            return False
+        try:
+            current_desired = build_mtp_desired_objects(
+                self.open_plan,
+                start_week=preview.start_week,
+                week_count=preview.week_count,
+                terrain=preview.terrain,
+            )
+            if current_desired != preview.desired:
+                raise MtpInstallError(
+                    "The MTP dry run is no longer current; preview the "
+                    "installation again."
+                )
+            result = apply_mtp_install(
+                preview.install,
+                state_store=preview.state_store,
+                confirmed=confirmed,
+            )
+        except (MtpError, MtpInstallError, MtpStateError) as error:
+            self._set_mtp_apply_error(preview.state_store, error)
+            return False
+        self._set_mtp_success(result)
+        return True
+
+    def recover_mtp_selection(self) -> bool:
+        """Continue one durable MTP journal using the current exact selection."""
+
+        selection = self._prepare_mtp_selection(
+            "recovered",
+            start_week=self.usb_start_week.get(),
+            week_count=self.usb_week_count.get(),
+            terrain=self.usb_terrain.get(),
+        )
+        if selection is None:
+            return False
+        _start_week, _week_count, desired = selection
+        try:
+            state_store = self._mtp_state_factory()
+            if state_store.read_journal() is None:
+                self.status.set(
+                    "MTP recovery not needed: there is no interrupted installation."
+                )
+                return False
+            result = recover_mtp_install(
+                self._mtp_transport_factory(),
+                FORERUNNER_265_PROVISIONAL_PROFILE,
+                state_store=state_store,
+                desired=desired,
+            )
+        except (MtpError, MtpInstallError, MtpStateError) as error:
+            self.status.set(
+                "MTP recovery did not finish; the journal remains for safe manual "
+                f"review or another recovery attempt. {error}"
+            )
+            return False
+        self._set_mtp_success(result)
+        return True
+
+    def _prepare_mtp_selection(
+        self,
+        action: str,
+        *,
+        start_week: int | str,
+        week_count: int | str,
+        terrain: str,
+    ) -> tuple[int, int, tuple[MtpDesiredObject, ...]] | None:
+        if self.open_plan is None or self._displayed_week_index is None:
+            self.status.set(
+                f"MTP install not {action}: import a dated JSON plan first."
+            )
+            return None
+        if sys.platform != "win32":
+            self.status.set(
+                "Windows MTP unavailable: this installation path requires Windows."
+            )
+            return None
+        if not self._store_visible_imported_week():
+            self.status.set(f"MTP install not {action}: {self.status.get()}")
+            return None
+        try:
+            parsed_start_week = int(start_week)
+            parsed_week_count = int(week_count)
+        except (TypeError, ValueError):
+            self.status.set(
+                f"MTP install not {action}: start week and block size must be "
+                "whole numbers."
+            )
+            return None
+        try:
+            desired = build_mtp_desired_objects(
+                self.open_plan,
+                start_week=parsed_start_week,
+                week_count=parsed_week_count,
+                terrain=terrain,
+            )
+        except MtpInstallError as error:
+            self.status.set(f"MTP install not {action}: {error}")
+            return None
+        return parsed_start_week, parsed_week_count, desired
+
+    def _set_mtp_error(self, action: str, error: Exception) -> None:
+        message = str(error)
+        if "unavailable" in message.lower() or "only on Windows" in message:
+            self.status.set(f"Windows MTP unavailable: {message}")
+            return
+        self.status.set(f"MTP install not {action}: {message}")
+
+    def _set_mtp_apply_error(
+        self,
+        state_store: MtpStateStore,
+        error: Exception,
+    ) -> None:
+        try:
+            recovery_required = state_store.read_journal() is not None
+        except MtpStateError:
+            self.status.set(
+                "MTP installation was not completed; local recovery state requires "
+                "manual review. No automatic retry was attempted."
+            )
+            return
+        if recovery_required:
+            self.status.set(
+                "MTP installation was not completed; recovery is required and no "
+                "automatic retry was attempted. Reconnect the same device, keep "
+                f"the same week block and terrain, then choose recovery. {error}"
+            )
+            return
+        self.status.set(f"MTP install not applied: {error}")
+
+    def _set_mtp_success(self, result: MtpInstallResult) -> None:
+        verb = "Recovered" if result.recovered else "Installed"
+        self.status.set(
+            f"{verb} {result.workout_count} MTP workout(s) on "
+            f"{result.manufacturer} {result.model}: copied "
+            f"{result.copied_count}, removed {result.removed_count} owned."
+        )
+
+    @staticmethod
+    def _close_mtp_preview(preview: MtpUiInstallPreview) -> None:
+        try:
+            preview.install.close_session()
+        except MtpError:
+            pass
 
     def _replace_visible_workouts(
         self, workouts: tuple[WeeklyWorkout, ...]

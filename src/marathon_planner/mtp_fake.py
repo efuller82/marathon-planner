@@ -74,7 +74,7 @@ class FakeMtpTransport:
     def __init__(self) -> None:
         self.call_log: list[str] = []
         self._devices: dict[str, _FakeDevice] = {}
-        self._faults: dict[str, list[BaseException]] = {}
+        self._faults: dict[str, list[BaseException | None]] = {}
         self._next_device_number = 1
         self._next_session_generation = 1
 
@@ -178,8 +178,9 @@ class FakeMtpTransport:
         error: BaseException | None = None,
         *,
         times: int = 1,
+        after_calls: int = 0,
     ) -> None:
-        """Raise at ``<operation>.before`` or ``<operation>.after`` boundaries."""
+        """Raise at a boundary, optionally after earlier matching calls succeed."""
 
         valid_operations = {
             "refresh",
@@ -202,7 +203,10 @@ class FakeMtpTransport:
             raise ValueError("Synthetic fault point is invalid.")
         if type(times) is not int or times < 1:
             raise ValueError("Synthetic fault count must be positive.")
+        if type(after_calls) is not int or after_calls < 0:
+            raise ValueError("Synthetic fault delay must not be negative.")
         faults = self._faults.setdefault(point, [])
+        faults.extend(None for _ in range(after_calls))
         for _ in range(times):
             faults.append(error or MtpError(f"Synthetic MTP fault at {point}."))
 
@@ -246,7 +250,8 @@ class FakeMtpTransport:
             error = faults.pop(0)
             if not faults:
                 del self._faults[point]
-            raise error
+            if error is not None:
+                raise error
 
     @staticmethod
     def _new_object_id(device: _FakeDevice) -> str:

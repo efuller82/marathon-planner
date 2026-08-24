@@ -14,13 +14,16 @@ except ModuleNotFoundError:
     tkinter_stub = ModuleType("tkinter")
     ttk_stub = ModuleType("tkinter.ttk")
     filedialog_stub = ModuleType("tkinter.filedialog")
+    messagebox_stub = ModuleType("tkinter.messagebox")
     ttk_stub.Frame = type("Frame", (), {})
+    messagebox_stub.askyesno = Mock(return_value=False)
     tkinter_stub.ttk = ttk_stub
     tkinter_stub.filedialog = filedialog_stub
-    tkinter_stub.messagebox = ModuleType("tkinter.messagebox")
+    tkinter_stub.messagebox = messagebox_stub
     sys.modules["tkinter"] = tkinter_stub
     sys.modules["tkinter.ttk"] = ttk_stub
     sys.modules["tkinter.filedialog"] = filedialog_stub
+    sys.modules["tkinter.messagebox"] = messagebox_stub
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -28,7 +31,9 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from marathon_planner.app import (  # noqa: E402
     MarathonPlannerApp,
+    MtpUiInstallPreview,
     WORKOUT_COLUMNS,
+    format_mtp_ui_preview,
     format_plan_summary,
 )
 from marathon_planner.models import (  # noqa: E402
@@ -38,6 +43,13 @@ from marathon_planner.models import (  # noqa: E402
     TrainingWeek,
     WeeklyWorkout,
 )
+from marathon_planner.mtp_install import (  # noqa: E402
+    MtpDesiredObject,
+    MtpInstallAction,
+    MtpInstallError,
+    MtpInstallResult,
+)
+from marathon_planner.mtp_transport import MtpError  # noqa: E402
 from marathon_planner.plan_import import PlanImportError  # noqa: E402
 from marathon_planner.usb_install import UsbInstallError  # noqa: E402
 
@@ -62,6 +74,14 @@ class WeeklyEditorActionTests(unittest.TestCase):
         app.open_plan = None
         app._displayed_week_index = None
         app.week_selector = Mock()
+        app._mtp_transport_factory = Mock(name="mtp_transport_factory")
+        app._mtp_state_factory = Mock(name="mtp_state_factory")
+        app.usb_start_week = Mock()
+        app.usb_start_week.get.return_value = "1"
+        app.usb_week_count = Mock()
+        app.usb_week_count.get.return_value = "1"
+        app.usb_terrain = Mock()
+        app.usb_terrain.get.return_value = "ROAD"
         return app
 
     def make_workout(self) -> WeeklyWorkout:
@@ -358,6 +378,380 @@ class WeeklyEditorActionTests(unittest.TestCase):
             app.status.value,
             "USB installation canceled; no files changed.",
         )
+
+    def test_mtp_preview_requires_an_imported_dated_plan(self) -> None:
+        app = self.make_app()
+
+        preview = app.preview_mtp_selection(
+            start_week=1,
+            week_count=1,
+            terrain="ROAD",
+        )
+
+        self.assertIsNone(preview)
+        self.assertIn("import a dated JSON plan", app.status.value)
+        app._mtp_transport_factory.assert_not_called()
+        app._mtp_state_factory.assert_not_called()
+
+    def test_mtp_is_unavailable_off_windows_without_calling_factories(self) -> None:
+        app = self.make_app()
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 1)),)
+        )
+        app._displayed_week_index = 0
+
+        with patch("marathon_planner.app.sys.platform", "linux"):
+            preview = app.preview_mtp_selection(
+                start_week=1,
+                week_count=1,
+                terrain="ROAD",
+            )
+
+        self.assertIsNone(preview)
+        self.assertIn("Windows MTP unavailable", app.status.value)
+        app._mtp_transport_factory.assert_not_called()
+        app._mtp_state_factory.assert_not_called()
+
+    def test_mtp_preview_uses_injected_transport_and_state_factories(self) -> None:
+        app = self.make_app()
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 1)),)
+        )
+        app._displayed_week_index = 0
+        desired = (MtpDesiredObject("20300402-mp.fit", b"fit"),)
+        state_store = Mock()
+        state_store.read_journal.return_value = None
+        planning_state = Mock()
+        state_store.read_planning_state.return_value = planning_state
+        transport = Mock()
+        install = Mock(changes=(Mock(),), workout_count=1)
+        app._mtp_state_factory.return_value = state_store
+        app._mtp_transport_factory.return_value = transport
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch.object(app, "_store_visible_imported_week", return_value=True),
+            patch(
+                "marathon_planner.app.build_mtp_desired_objects",
+                return_value=desired,
+            ) as build_desired,
+            patch(
+                "marathon_planner.app.build_mtp_install_preview",
+                return_value=install,
+            ) as build_preview,
+        ):
+            preview = app.preview_mtp_selection(
+                start_week="1",
+                week_count="1",
+                terrain="TRAIL",
+            )
+
+        self.assertIsNotNone(preview)
+        assert preview is not None
+        self.assertIs(preview.install, install)
+        self.assertIs(preview.state_store, state_store)
+        build_desired.assert_called_once_with(
+            app.open_plan,
+            start_week=1,
+            week_count=1,
+            terrain="TRAIL",
+        )
+        build_preview.assert_called_once_with(
+            transport,
+            unittest.mock.ANY,
+            planning_state=planning_state,
+            desired=desired,
+        )
+        self.assertIn("no device or local-state objects changed", app.status.value)
+
+    def test_mtp_missing_optional_adapter_has_actionable_unavailable_message(self) -> None:
+        app = self.make_app()
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 1)),)
+        )
+        app._displayed_week_index = 0
+        state_store = Mock()
+        state_store.read_journal.return_value = None
+        state_store.read_planning_state.return_value = Mock()
+        app._mtp_state_factory.return_value = state_store
+        app._mtp_transport_factory.side_effect = MtpError(
+            "Windows MTP support is unavailable because its optional COM adapter "
+            "is not installed."
+        )
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch.object(app, "_store_visible_imported_week", return_value=True),
+            patch(
+                "marathon_planner.app.build_mtp_desired_objects",
+                return_value=(MtpDesiredObject("20300402-mp.fit", b"fit"),),
+            ),
+        ):
+            preview = app.preview_mtp_selection(
+                start_week=1,
+                week_count=1,
+                terrain="ROAD",
+            )
+
+        self.assertIsNone(preview)
+        self.assertIn("Windows MTP unavailable", app.status.value)
+        self.assertIn("optional COM adapter", app.status.value)
+
+    def test_mtp_no_matching_device_is_reported_without_writes(self) -> None:
+        app = self.make_app()
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 1)),)
+        )
+        app._displayed_week_index = 0
+        state_store = Mock()
+        state_store.read_journal.return_value = None
+        state_store.read_planning_state.return_value = Mock()
+        app._mtp_state_factory.return_value = state_store
+        app._mtp_transport_factory.return_value = Mock()
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch.object(app, "_store_visible_imported_week", return_value=True),
+            patch(
+                "marathon_planner.app.build_mtp_desired_objects",
+                return_value=(MtpDesiredObject("20300402-mp.fit", b"fit"),),
+            ),
+            patch(
+                "marathon_planner.app.build_mtp_install_preview",
+                side_effect=MtpInstallError("No supported Garmin device was found."),
+            ),
+        ):
+            preview = app.preview_mtp_selection(
+                start_week=1,
+                week_count=1,
+                terrain="ROAD",
+            )
+
+        self.assertIsNone(preview)
+        self.assertIn("No supported Garmin device", app.status.value)
+
+    def test_mtp_unresolved_journal_routes_user_to_recovery(self) -> None:
+        app = self.make_app()
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 1)),)
+        )
+        app._displayed_week_index = 0
+        state_store = Mock()
+        state_store.read_journal.return_value = Mock()
+        app._mtp_state_factory.return_value = state_store
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch.object(app, "_store_visible_imported_week", return_value=True),
+            patch(
+                "marathon_planner.app.build_mtp_desired_objects",
+                return_value=(MtpDesiredObject("20300402-mp.fit", b"fit"),),
+            ),
+        ):
+            preview = app.preview_mtp_selection(
+                start_week=1,
+                week_count=1,
+                terrain="ROAD",
+            )
+
+        self.assertIsNone(preview)
+        self.assertIn("MTP recovery required", app.status.value)
+        self.assertIn("same week block and terrain", app.status.value)
+        app._mtp_transport_factory.assert_not_called()
+
+    def test_mtp_preview_render_includes_exact_selection_and_dry_run(self) -> None:
+        preview = MtpUiInstallPreview(
+            install=Mock(),
+            start_week=2,
+            week_count=3,
+            terrain="TRAIL",
+            desired=(),
+            state_store=Mock(),
+        )
+
+        with patch(
+            "marathon_planner.app.format_mtp_install_preview",
+            return_value="DRY RUN — no changes\nCOPY: synthetic.fit",
+        ):
+            rendered = format_mtp_ui_preview(preview)
+
+        self.assertIn("Block: week 2 through 4", rendered)
+        self.assertIn("Terrain: TRAIL", rendered)
+        self.assertIn("COPY: synthetic.fit", rendered)
+
+    def test_mtp_confirmation_decline_writes_nothing(self) -> None:
+        app = self.make_app()
+        install = Mock(
+            manufacturer="Garmin",
+            model="Forerunner 265",
+            destination="GARMIN/NewFiles",
+            workout_count=1,
+            changes=(
+                Mock(action=MtpInstallAction.COPY),
+                Mock(action=MtpInstallAction.REMOVE_OWNED),
+            ),
+        )
+        preview = MtpUiInstallPreview(
+            install=install,
+            start_week=2,
+            week_count=1,
+            terrain="TRAIL",
+            desired=(),
+            state_store=Mock(),
+        )
+        window = Mock()
+
+        with (
+            patch(
+                "marathon_planner.app.messagebox.askyesno", return_value=False
+            ) as confirm,
+            patch.object(app, "install_mtp_preview") as apply,
+        ):
+            app._confirm_mtp_install(preview, window)
+
+        apply.assert_not_called()
+        window.destroy.assert_not_called()
+        message = confirm.call_args.kwargs["message"]
+        self.assertIn("exactly the dry run currently displayed", message)
+        self.assertIn("COPY: 1; REMOVE OWNED: 1", message)
+        self.assertIn("no device or local-state objects changed", app.status.value)
+
+    def test_mtp_apply_rejects_visible_edits_after_preview(self) -> None:
+        app = self.make_app()
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 1)),)
+        )
+        app._displayed_week_index = 0
+        original = (MtpDesiredObject("20300402-mp.fit", b"original"),)
+        preview = MtpUiInstallPreview(
+            install=Mock(),
+            start_week=1,
+            week_count=1,
+            terrain="ROAD",
+            desired=original,
+            state_store=Mock(),
+        )
+
+        with (
+            patch.object(app, "_store_visible_imported_week", return_value=True),
+            patch(
+                "marathon_planner.app.build_mtp_desired_objects",
+                return_value=(MtpDesiredObject("20300402-mp.fit", b"changed"),),
+            ),
+            patch("marathon_planner.app.apply_mtp_install") as apply,
+        ):
+            installed = app.install_mtp_preview(preview, confirmed=True)
+
+        self.assertFalse(installed)
+        apply.assert_not_called()
+        self.assertIn("dry run is no longer current", app.status.value)
+
+    def test_mtp_confirmed_preview_applies_exact_contract(self) -> None:
+        app = self.make_app()
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 1)),)
+        )
+        app._displayed_week_index = 0
+        desired = (MtpDesiredObject("20300402-mp.fit", b"fit"),)
+        state_store = Mock()
+        install = Mock()
+        preview = MtpUiInstallPreview(
+            install=install,
+            start_week=1,
+            week_count=1,
+            terrain="ROAD",
+            desired=desired,
+            state_store=state_store,
+        )
+        result = MtpInstallResult("Garmin", "Forerunner 265", 1, 1, 0)
+
+        with (
+            patch.object(app, "_store_visible_imported_week", return_value=True),
+            patch(
+                "marathon_planner.app.build_mtp_desired_objects",
+                return_value=desired,
+            ),
+            patch(
+                "marathon_planner.app.apply_mtp_install", return_value=result
+            ) as apply,
+        ):
+            installed = app.install_mtp_preview(preview, confirmed=True)
+
+        self.assertTrue(installed)
+        apply.assert_called_once_with(
+            install,
+            state_store=state_store,
+            confirmed=True,
+        )
+        self.assertIn("Installed 1 MTP workout", app.status.value)
+
+    def test_mtp_incomplete_apply_reports_required_recovery(self) -> None:
+        app = self.make_app()
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 1)),)
+        )
+        app._displayed_week_index = 0
+        desired = (MtpDesiredObject("20300402-mp.fit", b"fit"),)
+        state_store = Mock()
+        state_store.read_journal.return_value = Mock()
+        preview = MtpUiInstallPreview(
+            install=Mock(),
+            start_week=1,
+            week_count=1,
+            terrain="ROAD",
+            desired=desired,
+            state_store=state_store,
+        )
+
+        with (
+            patch.object(app, "_store_visible_imported_week", return_value=True),
+            patch(
+                "marathon_planner.app.build_mtp_desired_objects",
+                return_value=desired,
+            ),
+            patch(
+                "marathon_planner.app.apply_mtp_install",
+                side_effect=MtpInstallError("forward recovery is required"),
+            ),
+        ):
+            installed = app.install_mtp_preview(preview, confirmed=True)
+
+        self.assertFalse(installed)
+        self.assertIn("recovery is required", app.status.value)
+        self.assertIn("no automatic retry", app.status.value)
+
+    def test_mtp_recovery_uses_injected_factories_and_reports_success(self) -> None:
+        app = self.make_app()
+        desired = (MtpDesiredObject("20300402-mp.fit", b"fit"),)
+        state_store = Mock()
+        state_store.read_journal.return_value = Mock()
+        transport = Mock()
+        app._mtp_state_factory.return_value = state_store
+        app._mtp_transport_factory.return_value = transport
+        result = MtpInstallResult(
+            "Garmin", "Forerunner 265", 1, 0, 1, recovered=True
+        )
+
+        with (
+            patch.object(
+                app,
+                "_prepare_mtp_selection",
+                return_value=(1, 1, desired),
+            ),
+            patch(
+                "marathon_planner.app.recover_mtp_install", return_value=result
+            ) as recover,
+        ):
+            recovered = app.recover_mtp_selection()
+
+        self.assertTrue(recovered)
+        recover.assert_called_once_with(
+            transport,
+            unittest.mock.ANY,
+            state_store=state_store,
+            desired=desired,
+        )
+        self.assertIn("Recovered 1 MTP workout", app.status.value)
 
 
 class WorkoutColumnLayoutTests(unittest.TestCase):

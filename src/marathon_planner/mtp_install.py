@@ -15,6 +15,12 @@ from hashlib import sha256
 import re
 import secrets
 
+from marathon_planner.fit_encoding import (
+    FitEncodingError,
+    Terrain,
+    encode_plan_workouts,
+)
+from marathon_planner.models import TrainingPlan
 from marathon_planner.mtp_state import (
     MtpDeviceOwnership,
     MtpJournal,
@@ -108,7 +114,7 @@ class MtpCompatibilityProfile:
     def display_destination(self) -> str:
         """Return the non-sensitive destination shown in a dry run."""
 
-        return "/".join(self.destination_path)
+        return "/".join((self.storage_name, *self.destination_path))
 
 
 FORERUNNER_265_PROVISIONAL_PROFILE = MtpCompatibilityProfile(
@@ -140,6 +146,68 @@ class MtpDesiredObject:
             raise MtpInstallError("A planned MTP workout must not be empty.")
         object.__setattr__(self, "size", len(self.data))
         object.__setattr__(self, "sha256", sha256(self.data).hexdigest())
+
+
+def build_mtp_desired_objects(
+    plan: TrainingPlan,
+    *,
+    start_week: int,
+    week_count: int,
+    terrain: Terrain | str,
+) -> tuple[MtpDesiredObject, ...]:
+    """Encode one explicit plan block for the MTP planner.
+
+    This is intentionally separate from the mounted-device installer so the
+    two UI paths cannot auto-fallback into one another.
+    """
+
+    if not isinstance(plan, TrainingPlan):
+        raise MtpInstallError("A dated training plan is required for MTP install.")
+    if type(start_week) is not int or start_week < 1:
+        raise MtpInstallError("Start week must be a positive whole number.")
+    if type(week_count) is not int or week_count < 1:
+        raise MtpInstallError(
+            "Block size must be a positive whole number of weeks."
+        )
+    if start_week > len(plan.weeks):
+        raise MtpInstallError("Start week is outside the open plan.")
+    ending_week = start_week + week_count - 1
+    if ending_week > len(plan.weeks):
+        raise MtpInstallError(
+            "The selected block extends past the end of the open plan."
+        )
+    try:
+        selected_terrain = Terrain(terrain)
+    except (TypeError, ValueError) as error:
+        raise MtpInstallError("Terrain must be ROAD or TRAIL.") from error
+    try:
+        artifacts = encode_plan_workouts(plan)
+    except (FitEncodingError, ValueError) as error:
+        raise MtpInstallError(str(error)) from error
+
+    desired: list[MtpDesiredObject] = []
+    artifact_index = 0
+    for week_index, week in enumerate(plan.weeks, start=1):
+        for _workout in week.workouts:
+            pair = artifacts[artifact_index : artifact_index + len(Terrain)]
+            artifact_index += len(Terrain)
+            if (
+                len(pair) != len(Terrain)
+                or {item.terrain for item in pair} != set(Terrain)
+            ):
+                raise MtpInstallError(
+                    "Encoded workout terrain variants are incomplete."
+                )
+            if start_week <= week_index <= ending_week:
+                selected = next(
+                    item for item in pair if item.terrain is selected_terrain
+                )
+                desired.append(MtpDesiredObject(selected.filename, selected.data))
+    if artifact_index != len(artifacts):
+        raise MtpInstallError(
+            "Encoded workout order does not match the open plan."
+        )
+    return tuple(desired)
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +267,11 @@ class MtpInstallPreview:
             for change in self.changes
         )
 
+    def close_session(self) -> None:
+        """Release the live device session and invalidate this preview."""
+
+        self._session.close()
+
 
 @dataclass(frozen=True, slots=True)
 class MtpInstallResult:
@@ -254,12 +327,19 @@ def preview_mtp_install(
     """
 
     session = select_supported_mtp_session(transport, profile)
-    return plan_mtp_install(
-        session,
-        profile,
-        planning_state=planning_state,
-        desired=desired,
-    )
+    try:
+        return plan_mtp_install(
+            session,
+            profile,
+            planning_state=planning_state,
+            desired=desired,
+        )
+    except Exception:
+        try:
+            session.close()
+        except MtpError:
+            pass
+        raise
 
 
 def plan_mtp_install(
@@ -479,6 +559,11 @@ def apply_mtp_install(
             _mark_journal_indeterminate(state_store, transaction_id)
         raise
     except MtpStateError as error:
+        if transaction_id is None:
+            raise MtpInstallError(
+                "The MTP dry run is no longer current; preview the installation "
+                "again."
+            ) from error
         _mark_journal_indeterminate(state_store, transaction_id)
         raise MtpInstallError(
             "The MTP installation did not finish; forward recovery is required."
@@ -504,6 +589,7 @@ def recover_mtp_install(
         raise MtpInstallError("The MTP local state store is invalid.")
     _validate_desired(desired)
     transaction_id: str | None = None
+    session: MtpSession | None = None
     try:
         journal = state_store.read_journal()
         if journal is None:
@@ -542,6 +628,12 @@ def recover_mtp_install(
         raise MtpInstallError(
             "The MTP recovery did not finish and remains safely journaled."
         ) from error
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except MtpError:
+                pass
 
 
 def _same_preview_contract(

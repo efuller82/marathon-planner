@@ -336,8 +336,13 @@ class MtpStateStore:
             return
         if current.transaction_id != transaction_id:
             raise MtpStateError("A different MTP recovery journal is present.")
-        self.journal_path.unlink()
-        _sync_directory(self.root)
+        try:
+            self.journal_path.unlink()
+            _sync_directory(self.root)
+        except OSError as error:
+            raise MtpStateError(
+                "MTP recovery journal could not be cleared durably."
+            ) from error
 
     def _read_or_create_salt(self) -> bytes:
         existing = self._read_optional(self.salt_path, "MTP binding salt", binary=True)

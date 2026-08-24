@@ -228,6 +228,32 @@ class FakeMtpTransportTests(unittest.TestCase):
                     transport.inject_fault(f"{operation}.{boundary}")
                     self.assertIn(f"{operation}.{boundary}", transport._faults)
 
+    def test_fault_can_be_delayed_until_a_later_matching_boundary(self) -> None:
+        session = self.transport.open_session(self.device)
+        self.transport.inject_fault("enumerate.after", after_calls=2)
+
+        session.enumerate_children(self.folder.object_id)
+        session.enumerate_children(self.folder.object_id)
+        with self.assertRaisesRegex(MtpError, "enumerate.after"):
+            session.enumerate_children(self.folder.object_id)
+
+    def test_close_boundary_faults_preserve_exact_session_state(self) -> None:
+        before_session = self.transport.open_session(self.device)
+        self.transport.inject_fault("close.before")
+        with self.assertRaisesRegex(MtpError, "close.before"):
+            before_session.close()
+        self.assertEqual(
+            before_session.enumerate_children(self.folder.object_id),
+            (),
+        )
+
+        after_session = self.transport.open_session(self.device)
+        self.transport.inject_fault("close.after")
+        with self.assertRaisesRegex(MtpError, "close.after"):
+            after_session.close()
+        with self.assertRaisesRegex(MtpSessionError, "closed"):
+            after_session.enumerate_children(self.folder.object_id)
+
 
 if __name__ == "__main__":
     unittest.main()

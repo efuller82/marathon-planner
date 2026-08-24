@@ -21,72 +21,75 @@
   week block and terrain. It reconstructs the exact preview, revalidates
   device-bound SHA-256 ownership, rolls interrupted commits back, and preserves
   unrelated files.
-- The issue #12 branch has a bounded MTP protocol/fake, atomic local ownership
-  and forward-recovery records, and the provisional Garmin Forerunner 265
-  profile for exact `Internal Storage/GARMIN/NewFiles` topology.
+- Issue #12's branch has a bounded MTP protocol/fake, atomic local ownership and
+  forward-recovery records, and a provisional Garmin Forerunner 265 profile for
+  the exact `Internal Storage/GARMIN/NewFiles` topology.
 - MTP preview is read-only. It requires one strict supported-device match,
   unambiguous containers and inventory, persistent identities, and full
   readback of every present owned object. It plans only `COPY` and
   `REMOVE OWNED`; changed ownership and unrelated collisions fail closed.
-- Initial MTP preview holds a new local binding salt only in memory. Confirmed
-  application persists that exact salt, reconstructs the exact live-session
-  preview, and durably writes a `PREPARED` journal before its first device
-  mutation.
-- MTP application copies deterministic bytes, resolves committed identities,
-  verifies every copy by full readback, checkpoints forward progress, commits
-  verified ownership before cleanup, and deletes only an old object whose
-  destination, persistent identity, name, size, and full digest are revalidated.
-- MTP forward recovery resumes durably verified copies and partial cleanup on
-  the exact salted device binding. Uncheckpointed or ambiguous commits are
-  never adopted, deleted, retried, or cleared automatically.
-- The full gate compiles the project and runs 135 unit tests using only
-  synthetic workout, filesystem, and MTP data. One symbolic-link safety test
-  skips when the Windows account cannot create symbolic links.
+- MTP application and recovery use exact-preview reconstruction, a durable
+  forward journal, exact writes, committed identities, full readback, ownership
+  before cleanup, and complete revalidation before each nonrecursive delete.
+- The Windows watch connector validates exact property and result types, bounds
+  device-supplied lists, text, buffers, and files, verifies every transfer and
+  readback, releases connection resources, and deletes only one proven object
+  without recursion.
+- The optional Windows connection code loads only when an MTP operation begins.
+  Importing the application and running synthetic tests requires no `comtypes`;
+  missing optional support disables only MTP with actionable status text.
+- Optional Windows MTP support uses the MIT-licensed `comtypes` 1.4.16 universal
+  wheel from a SHA-256-locked, wheel-only requirements file. It has no required
+  transitive dependency or recurring service cost.
+- The desktop exposes MTP as a separate Windows action using the existing
+  explicit week block and ROAD/TRAIL selection. It never falls back to the
+  mounted-drive installer or guesses a device path.
+- The MTP window displays the exact sanitized dry run and selection, requires a
+  second explicit confirmation, rejects changed visible plan bytes, and routes
+  an unresolved or interrupted journal to a separately invoked recovery action.
+- MTP local ownership and journal files default to local Windows application
+  data. Preview does not create them; missing Windows/optional support disables
+  only MTP with actionable status text.
+- The full gate compiles the project and runs 176 unit tests using only
+  synthetic workout, filesystem, MTP, UI, and Windows-connector data. One
+  symbolic-link safety test skips when the Windows account cannot create links.
 - Physical Garmin-device compatibility remains explicitly unverified.
 - Approved issue #11 tracks the owner-run physical mass-storage validation and
   is In Progress on the project board.
 - Approved issue #12 tracks safe Windows MTP workout installation for the
-  Forerunner 265 and is In Progress on the project board.
+  Forerunner 265 and remains In Progress. Its single pull request is open but
+  must not merge until the owner-run synthetic watch check passes.
 
 ## This session
 
-- Added confirmed MTP application with exact-preview reconstruction against
-  the original live session and stale ownership/inventory rejection before a
-  journal or device write.
-- Added exact preview-salt persistence, create-only `PREPARED` journals,
-  same-transaction checkpoints, copy identity resolution, bounded full
-  readback, and durable `INDETERMINATE` marking after unresolved mutations.
-- Added forward recovery that verifies the profile, salted device binding,
-  destination, desired byte contract, live copied objects, and current
-  ownership before resuming.
-- Added ownership reconstruction that preserves other device catalogs, records
-  only exact desired verified objects, drops consumed prior records, and is
-  committed before any cleanup starts.
-- Added idempotent cleanup that retains old ownership until deletion, finds old
-  objects by persistent identity,
-  revalidates their complete ownership proof immediately before nonrecursive
-  deletion, resolves ambiguous post-delete results, and preserves changed or
-  replaced objects with the journal still durable.
-- Added core application/recovery tests for persisted ordering, stale preview
-  rejection, ambiguous copy commit recovery, ownership-before-cleanup,
-  cleanup tampering, safe rotation, exact salt persistence, and unresolved
-  journal protection.
-- Ran the full gate: 134 tests passed and the permission-dependent symbolic-link
-  test skipped.
+- Reviewed the complete issue #12 change against `origin/master`, including the
+  two earlier branch commits and all remaining Windows connector, desktop,
+  dependency, documentation, and synthetic-test work.
+- Confirmed the changes preserve the mounted-drive installer, keep device and
+  runner identifiers out of public output, reject stale or ambiguous device
+  state, verify copied bytes before ownership, and revalidate complete ownership
+  before any one-object cleanup.
+- Corrected the stale `SECURITY.md` known-gap entry: MTP ownership, rotation, and
+  recovery are implemented with synthetic coverage, while physical Forerunner
+  265 compatibility remains explicitly unverified.
+- Rechecked the reviewed `comtypes` 1.4.16 hash lock and lazy-loading boundary;
+  normal application imports and the synthetic gate remain dependency-free.
+- Ran the complete compile/unit gate: 176 tests ran, 175 passed, and the existing
+  Windows symbolic-link permission test skipped.
+- Committed all remaining issue #12 branch work and opened its one pull request
+  for CI and the owner-run physical acceptance check. The profile remains
+  provisional and the pull request remains unmerged.
 
 ## Next
 
-1. Add exhaustive issue #12 fault tests for every create/write/commit/identity/
-   readback boundary, every local checkpoint, stale preview variant,
-   indeterminate commit, partial cleanup, device reconnect, and repeated
-   idempotent recovery.
-2. Add the lazily imported WPD adapter behind a fake low-level facade, then add
-   the separate Windows MTP UI path without changing mass-storage behavior.
-3. Run the full gate, review and hash-pin the Windows-only COM dependency, open
-   one PR, and keep the Forerunner 265 profile provisional.
-4. Owner-run issue #12's minimal synthetic physical-device acceptance check;
-   enable and document only the exact profile that passes before merge.
-5. When a mass-storage Garmin is available, resume issue #11's separate
+1. Owner-run issue #12's minimal synthetic physical-device acceptance check from
+   the open pull request; do not use a real runner plan or record device IDs.
+2. Record only the Windows version family, model, topology shape without IDs,
+   and pass/fail on issue #12. Enable and document only the exact profile that
+   passes; keep it provisional if any check fails.
+3. Merge only after green pull-request checks and the owner check, then close
+   issue #12 and move its project card to Done.
+4. When a mass-storage Garmin is available, resume issue #11's separate
    physical validation.
 
 ## Blockers
@@ -94,5 +97,5 @@
 - The available owner-provided Forerunner 265 uses MTP and does not expose the
   mounted filesystem required by the shipped mass-storage installer. A
   mass-storage Garmin is required to complete issue #11.
-- Issue #12's physical compatibility cannot be confirmed until its WPD adapter
-  and UI path are complete and the owner-run synthetic device check passes.
+- Issue #12's physical compatibility cannot be confirmed until the owner-run
+  synthetic device check passes.
