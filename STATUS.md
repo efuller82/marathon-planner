@@ -67,23 +67,25 @@
 - Windows version family: Windows 10
 - Model: Forerunner 265
 - Sanitized topology shape: `Internal Storage/GARMIN/NewFiles`
-- Full owner-run synthetic acceptance result: FAIL
+- Full owner-run synthetic acceptance retry result: FAIL
 - The provisional profile remains unverified. PR #13 remains open and unmerged.
-- Posted the same four-field sanitized result to issue #12. No identifiers,
-  ownership metadata, raw device metadata, or real runner data were recorded.
+- Issue #12's existing four-field sanitized FAIL record remains accurate. No
+  identifiers, ownership metadata, raw device metadata, or real runner data
+  were recorded.
 
 ## Next
 
-1. Owner: complete the application's local manual-review path for the failed
-   synthetic copy before any retry; preserve the recovery state until that
-   review is complete.
-2. After the owner confirms the manual review is complete, decide on issue #12
-   whether the physical failure needs a connector correction or a fresh full
-   acceptance run.
-3. Merge only after preview, verified write, watch appearance/consumption, and
+1. Diagnose the repeatable physical write failure without another device
+   mutation, using synthetic data and sanitized stage results only; preserve the
+   active recovery state during diagnosis.
+2. Correct the connector only if the read-only diagnosis identifies a bounded
+   issue, then rerun the complete compile/unit gate and PR checks.
+3. Repeat the full physical acceptance check only after the failure is
+   understood and a green correction is ready.
+4. Merge only after preview, verified write, watch appearance/consumption, and
    missing-owned handling all pass and issue #12 has a new sanitized PASS
    record.
-4. Close issue #12 and move its project card to Done only after the green PR
+5. Close issue #12 and move its project card to Done only after the green PR
    merges. Keep the profile provisional while any physical step has not passed.
 
 ## Blockers
@@ -91,6 +93,6 @@
 - The available owner-provided Forerunner 265 uses MTP and does not expose the
   mounted filesystem required by the shipped mass-storage installer. A
   mass-storage Garmin is required to complete issue #11.
-- Issue #12's full owner-run synthetic check has a FAIL result. Owner manual
-  review is required before another attempt; compatibility cannot be confirmed
-  until a later complete check passes.
+- Issue #12's full owner-run synthetic check and its owner-requested retry both
+  have a FAIL result. Compatibility cannot be confirmed until the repeatable
+  physical write failure is understood and a later complete check passes.
