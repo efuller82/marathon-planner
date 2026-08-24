@@ -787,7 +787,14 @@ def _set_property(values: object, key: WpdPropertyKey, value: WpdPropertyValue) 
     else:
         if not isinstance(value.value, str):
             raise WpdCallError("object GUID property validation", E_INVALIDARG)
-        guid = GUID(value.value)
+        # The transport contract carries GUID text unbraced, but the Windows
+        # converter accepts only the braced registry form.
+        try:
+            guid = GUID(f"{{{value.value}}}")
+        except (OSError, ValueError) as error:
+            raise WpdCallError(
+                "object GUID property validation", E_INVALIDARG
+            ) from error
         _call_s_ok(values, IPortableDeviceValues, "SetGuidValue", f"{key.value} property", byref(native_key), byref(guid))
 
 

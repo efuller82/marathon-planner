@@ -552,5 +552,68 @@ assert 'marathon_planner._wpd_comtypes' not in sys.modules
                 WpdMtpTransport().refresh_devices()
 
 
+@unittest.skipUnless(sys.platform == "win32", "requires the Windows COM facade")
+class WindowsGuidPropertySetTests(unittest.TestCase):
+    """Local-only checks of native property conversion; no device is touched."""
+
+    def setUp(self) -> None:
+        try:
+            import comtypes
+
+            from marathon_planner import _wpd_comtypes as wpd_com
+        except ImportError:
+            self.skipTest("optional comtypes support is not installed")
+        comtypes.CoInitialize()
+        self.wpd_com = wpd_com
+        self.values = wpd_com._create_handle(
+            wpd_com.CLSID_PORTABLE_DEVICE_VALUES,
+            wpd_com.IPortableDeviceValues,
+            "object property collection creation",
+        )
+        self.addCleanup(self.values.release)
+        self.pointer = wpd_com._pointer(self.values, wpd_com.IPortableDeviceValues)
+
+    def test_creation_properties_accept_unbraced_transport_guid_text(self) -> None:
+        wpd_com = self.wpd_com
+        for key, value in {
+            WpdPropertyKey.OBJECT_PARENT_ID: _text("synthetic-parent"),
+            WpdPropertyKey.OBJECT_NAME: _text("synthetic.fit"),
+            WpdPropertyKey.OBJECT_ORIGINAL_FILE_NAME: _text("synthetic.fit"),
+            WpdPropertyKey.OBJECT_SIZE: _uint64(230),
+            WpdPropertyKey.OBJECT_CONTENT_TYPE: _guid(WPD_CONTENT_TYPE_GENERIC_FILE),
+            WpdPropertyKey.OBJECT_FORMAT: _guid(WPD_OBJECT_FORMAT_UNSPECIFIED),
+        }.items():
+            wpd_com._set_property(self.pointer, key, value)
+
+        stored = wpd_com.GUID()
+        wpd_com._call_s_ok(
+            self.pointer,
+            wpd_com.IPortableDeviceValues,
+            "GetGuidValue",
+            "object GUID property readback",
+            wpd_com.byref(
+                wpd_com._PROPERTY_KEYS[WpdPropertyKey.OBJECT_CONTENT_TYPE]
+            ),
+            wpd_com.byref(stored),
+        )
+        self.assertEqual(
+            str(stored).strip("{}").lower(), WPD_CONTENT_TYPE_GENERIC_FILE
+        )
+
+    def test_malformed_guid_text_fails_closed_before_any_device_call(self) -> None:
+        # WpdPropertyValue already rejects non-canonical GUID text, so bypass
+        # its validation to prove the converter also fails closed on its own.
+        malformed = object.__new__(WpdPropertyValue)
+        object.__setattr__(malformed, "kind", WpdPropertyType.GUID)
+        object.__setattr__(malformed, "value", "not-a-guid")
+
+        with self.assertRaises(WpdCallError):
+            self.wpd_com._set_property(
+                self.pointer,
+                WpdPropertyKey.OBJECT_CONTENT_TYPE,
+                malformed,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
