@@ -12,74 +12,75 @@
   ordered workout rows, validate authored weeks, import version 1 and 2 local
   JSON plans, switch among weeks, and use the issue #14 window with menus,
   navigation, and plain-language help.
-- Each dated workout deterministically encodes to collision-safe ROAD and
-  TRAIL FIT files, and the desktop app exports the complete open plan as one
-  deterministic local ZIP with a hashed manifest.
-- The mass-storage USB installer previews and applies an explicit contiguous
-  week block and terrain with device-bound ownership, rollback, and
+- Road and trail pace targets are merged and watch-verified (issue #16
+  closed, PR #19 merged 2026-08-25). Each dated workout encodes to
+  collision-safe ROAD and TRAIL FIT files with optional per-terrain pace
+  alert bands, and terrain BOTH (the default) installs both versions side by
+  side.
+- **Verified watch behavior (Forerunner 265, owner-run 2026-08-25): the
+  watch lists both installed workouts under both the Run and the Trail Run
+  activities — it does not sort trail-marked files under Trail Run only.
+  The core road-vs-trail requirement is met through clearly named workouts
+  ("ROAD: …" / "TRAIL: …") carrying genuinely different pace bands; the
+  runner picks the one matching the terrain.**
+- The desktop app exports the complete open plan as one deterministic local
+  ZIP with a hashed manifest. The mass-storage USB installer and the
+  verified Forerunner 265 MTP installer preview and apply an explicit
+  contiguous week block with device-bound ownership, rollback, and
   preservation of unrelated files. Physical mass-storage validation (issue
   #11) remains blocked on hardware.
-- The Forerunner 265 MTP installation is merged and physically verified
-  (issue #12 closed, PR #13 merged, owner-run acceptance passed 2026-08-24).
-- **New, awaiting the owner-run watch check:** issue #16 pace targets are
-  fully implemented on PR #19 (branch `feature/16-pace-targets`, CI green,
-  card In Progress). A workout can carry an optional road pace
-  (minutes:seconds per mile); the plan carries one user-authored
-  road-to-trail adjustment and one alert buffer, each overridable per
-  workout. ROAD files encode the road pace range and TRAIL files the trail
-  range, so the watch alerts when the runner leaves the band. JSON schema
-  version 2 adds the fields; version 1 plans import unchanged; paceless
-  workouts keep byte-identical FIT files, filenames, and ownership digests
-  (locked by the existing golden-hash test).
-- The full gate compiles the project and runs 234 unit tests using only
+- **Awaiting the owner-run watch check for issue #17:** dated on-watch names
+  are on PR #20 (branch `feature/17-dated-watch-names`, card In Progress).
+  Every workout name now starts with its authored date ("Apr 2 ROAD: Easy
+  run"), so a runner can tell which workout belongs to which day. All file
+  identities changed with the new bytes, so a re-install replaces older
+  installed app files cleanly.
+- The full gate compiles the project and runs 238 unit tests using only
   synthetic data; one Windows symbolic-link permission test skips.
 
 ## This session
 
-- Posted the issue #16 implementation plan, built the whole feature on
-  `feature/16-pace-targets` from the updated `origin/master`, and opened PR
-  #19 with green checks.
-- Design choices worth remembering: pace values are whole seconds everywhere
-  in the model and schema (the editor translates m:ss text); exported
-  plan.json stays version 1 when the plan has no pace rules so existing
-  exports remain byte-identical, and becomes version 2 exactly when pace
-  settings exist; the FIT identity digest gains pace fields only for paced
-  workouts so already-installed paceless workouts keep their filenames and
-  ownership records.
-- Verified the wider editor layout (three new pace columns and the plan pace
-  rules bar) with DPI-aware screenshots at the owner's 150 % scaling: empty,
-  imported, and override-carrying weeks all render fully on screen.
-- Coordinated with issue #17 by comment: the on-watch name is untouched and
-  pace never enters it, so #17 can prepend the authored date cleanly.
-- Wrote the owner-run watch check steps on issue #16 and created the local
-  untracked fixture `acceptance-paced-synthetic.json` (synthetic 11:00/mi
-  road pace, +90 trail, ±30 buffer; expected on-watch bands ROAD about
-  10:30–11:30 and TRAIL about 12:00–13:00 per mile).
-- Still uncommitted in this folder: the AGENTS.md owner-communication update
-  (owner decision pending) and the untracked local synthetic fixtures
-  `acceptance-synthetic.json` and `acceptance-paced-synthetic.json`.
+- The owner re-ran the revised issue #16 watch check: both workouts were
+  installed and appeared, with the watch listing both under both Run and
+  Trail Run. That is the second of the two behaviors the revised check
+  anticipated and passes the requirement (distinct names, distinct paces).
+  Recorded the result on issue #16, merged PR #19 on green checks, issue
+  closed and its card moved to Done automatically.
+- The TRAIL files keep their trail-run activity marker: it is harmless on
+  the Forerunner 265 and may help models that do sort by activity.
+- Implemented issue #17 (PR #20): the encoder prefixes every on-watch
+  workout name with the authored date in fixed English month form ("Apr 2"),
+  so the bytes never depend on the computer's language settings. The date
+  and terrain lead the name, so shortening a long title can never drop
+  them. Every file identity gained a name-format marker so filenames change
+  with the bytes and installers replace older installed files instead of
+  refusing them. In-app help updated; two new tests plus refreshed golden
+  hashes (238 green). No schema change; version 1 and 2 plans import
+  unchanged.
+- Noticed but did not change: the exported package's README still says
+  "choose one terrain variant … do not install both", which predates the
+  BOTH default from issue #16. Candidate small follow-up, owner decision.
 
 ## Next
 
-1. Owner action: run the issue #16 watch check using the steps in the issue
-   comment (import `acceptance-paced-synthetic.json`, install ROAD week 1 on
-   the Forerunner 265, confirm the pace range and the off-pace alert, record
-   model and pass/fail only). Exact next action after a PASS: merge PR #19 on
-   green checks, close issue #16, move its card to Done. On a FAIL: record
-   which step failed and diagnose read-only first.
-2. Then issue #17 (authored date in each workout's on-watch name; small,
-   encoding-only; the composition contract is already commented on the
-   issue) and issue #18 (date-aware cleanup of app-installed workouts from
-   the watch; depends on #17 and starts with an owner-run read-only
-   investigation).
-3. Owner decision: review the uncommitted AGENTS.md owner-communication
-   update (`git diff AGENTS.md`) and either commit it as a
-   documentation-only change or discard it.
-4. Optional owner cleanup on the watch: delete the imported synthetic test
-   workouts from the watch's Workouts list (issue #18 will automate this).
+1. Owner action: run the issue #17 watch check in the latest issue #17
+   comment (import `acceptance-paced-synthetic.json`, terrain BOTH, week 1,
+   install on the Forerunner 265; confirm both workout names start with
+   "Apr 2" and older app-installed test workouts show as replaced; record
+   model and pass/fail only). After a PASS: merge PR #20 on green checks,
+   close issue #17, move its card to Done. On a FAIL: record which step
+   failed and diagnose read-only first.
+2. Then issue #18 (date-aware cleanup of app-installed workouts; its
+   positive identification of app files builds on the dated identities from
+   #17).
+3. Owner decision: review the still-uncommitted AGENTS.md
+   owner-communication section (`git diff AGENTS.md`) and either commit it
+   as a documentation-only change or discard it.
+4. Owner decision: whether to align the export package README wording with
+   the BOTH install default in a small follow-up.
 
 ## Blockers
 
-- Issue #16 cannot merge until the owner runs the watch check above.
+- Issue #17 cannot merge until the owner runs its watch check.
 - Issue #11 requires a mass-storage Garmin device; the available Forerunner
   265 exposes only MTP.

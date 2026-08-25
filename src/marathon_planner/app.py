@@ -108,10 +108,12 @@ calendar, and ready-to-install workout files.
 6. To put workouts on your watch, connect it over USB, pick the start \
 week, the number of weeks, and the terrain, then choose "Preview USB \
 install". BOTH installs the road and the trail version of every workout \
-side by side, so on the watch you pick "ROAD: …" with your road pace or \
-"TRAIL: …" with your trail pace; choose ROAD or TRAIL alone to install \
-only that version. A read-only preview always opens first, and nothing \
-is written until you confirm that exact preview.
+side by side, so on the watch you pick "Apr 2 ROAD: …" with your road \
+pace or "Apr 2 TRAIL: …" with your trail pace; choose ROAD or TRAIL \
+alone to install only that version. Every workout's name starts with \
+its planned date so you can tell the days apart on the watch, and you \
+can still run any workout on any day. A read-only preview always opens \
+first, and nothing is written until you confirm that exact preview.
 
 7. A Forerunner 265 does not appear as a USB drive. On Windows, use \
 "Preview connected Forerunner 265" in the same section with the same \

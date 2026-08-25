@@ -188,6 +188,54 @@ class FitEncodingTests(unittest.TestCase):
         self.assertNotIn(11, road_workout)
         self.assertEqual(trail_workout[11], b"\x03")
 
+    def test_workout_names_carry_the_authored_date(self) -> None:
+        artifacts = encode_plan_workouts(synthetic_plan())
+
+        names = []
+        for artifact in artifacts:
+            workout = next(
+                fields
+                for number, fields in parse_fit(artifact.data)
+                if number == 26
+            )
+            names.append(text(workout[8]))
+
+        self.assertEqual(
+            names,
+            [
+                "Apr 2 ROAD: Aerobic run",
+                "Apr 2 TRAIL: Aerobic run",
+                "Apr 10 ROAD: Steady run",
+                "Apr 10 TRAIL: Steady run",
+            ],
+        )
+
+    def test_long_title_keeps_date_and_terrain_when_shortened(self) -> None:
+        workout = WeeklyWorkout(
+            day="2030-12-09",
+            title="Synthetic ridge crest circuit " * 8,
+            goal=RunGoal(GoalType.TIME, 30, "min"),
+            road_choice="Flat loop",
+            trail_choice="Rolling loop",
+        )
+        plan = TrainingPlan(
+            (TrainingWeek((workout,), start_date=date(2030, 12, 9)),)
+        )
+
+        for artifact in encode_plan_workouts(plan):
+            with self.subTest(terrain=artifact.terrain):
+                fields = next(
+                    fields
+                    for number, fields in parse_fit(artifact.data)
+                    if number == 26
+                )
+                name = text(fields[8])
+                self.assertLessEqual(len(fields[8]), 64)
+                self.assertTrue(
+                    name.startswith(f"Dec 9 {artifact.terrain.value}: ")
+                )
+                self.assertTrue(name.endswith("..."))
+
     def test_time_goal_round_trips_in_milliseconds(self) -> None:
         *_, road, _trail = encode_plan_workouts(synthetic_plan())
 
@@ -234,11 +282,11 @@ class FitEncodingTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(
             sha256(first[0].data).hexdigest(),
-            "c739cd67eafd704537705345efb877fb38a316f25ea54884bf7d937fb99f5188",
+            "96b5d676ffe072f206157d5977e5a2ba8c36d497ad4a21d50863ac99a5b21776",
         )
         self.assertEqual(
             sha256(first[1].data).hexdigest(),
-            "fef31ea0d1a72a74b46a01cfdce6f75c3b61460d1db15bd66fe9f00806c8813b",
+            "c00ac83819477e60b636fbbd2085f2f1c3efef8999b814f52c5dab68a1581503",
         )
 
     def test_identical_workouts_remain_collision_safe_by_plan_position(self) -> None:
