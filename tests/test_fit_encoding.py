@@ -175,6 +175,19 @@ class FitEncodingTests(unittest.TestCase):
         self.assertEqual(text(trail_step[0]), "TRAIL: Orchard trail")
         self.assertNotEqual(road.data, trail.data)
 
+    def test_trail_files_declare_the_trail_run_activity(self) -> None:
+        road, trail, *_ = encode_plan_workouts(synthetic_plan())
+
+        road_workout = next(
+            fields for number, fields in parse_fit(road.data) if number == 26
+        )
+        trail_workout = next(
+            fields for number, fields in parse_fit(trail.data) if number == 26
+        )
+
+        self.assertNotIn(11, road_workout)
+        self.assertEqual(trail_workout[11], b"\x03")
+
     def test_time_goal_round_trips_in_milliseconds(self) -> None:
         *_, road, _trail = encode_plan_workouts(synthetic_plan())
 
@@ -222,6 +235,10 @@ class FitEncodingTests(unittest.TestCase):
         self.assertEqual(
             sha256(first[0].data).hexdigest(),
             "c739cd67eafd704537705345efb877fb38a316f25ea54884bf7d937fb99f5188",
+        )
+        self.assertEqual(
+            sha256(first[1].data).hexdigest(),
+            "fef31ea0d1a72a74b46a01cfdce6f75c3b61460d1db15bd66fe9f00806c8813b",
         )
 
     def test_identical_workouts_remain_collision_safe_by_plan_position(self) -> None:

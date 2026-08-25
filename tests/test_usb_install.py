@@ -190,14 +190,33 @@ class DryRunSelectionTests(UsbInstallTestCase):
                 with self.assertRaisesRegex(UsbInstallError, message):
                     self.preview(start_week=start_week, week_count=week_count)
 
+    def test_both_terrains_install_side_by_side(self) -> None:
+        # Week 1 has two workouts, so BOTH installs four files: a road and a
+        # trail version of each workout, side by side.
+        preview = self.preview(start_week=1, week_count=1, terrain="BOTH")
+
+        copies = [
+            change
+            for change in preview.changes
+            if change.action is InstallAction.COPY
+        ]
+        self.assertEqual(len(copies), 4)
+        self.assertEqual(preview.workout_count, 4)
+        self.assertEqual(
+            sum("-road-" in change.relative_path for change in copies), 2
+        )
+        self.assertEqual(
+            sum("-trail-" in change.relative_path for change in copies), 2
+        )
+
     def test_invalid_terrain_is_rejected(self) -> None:
-        with self.assertRaisesRegex(UsbInstallError, "ROAD or TRAIL"):
+        with self.assertRaisesRegex(UsbInstallError, "ROAD, TRAIL, or BOTH"):
             preview_usb_install(
                 self.plan,
                 self.device,
                 start_week=1,
                 week_count=1,
-                terrain="BOTH",
+                terrain="GRAVEL",
             )
 
     def test_preview_does_not_change_the_synthetic_device(self) -> None:

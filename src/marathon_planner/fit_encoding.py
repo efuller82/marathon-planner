@@ -36,6 +36,7 @@ FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
 _FILE_TYPE_WORKOUT = 5
 _MANUFACTURER_DEVELOPMENT = 255
 _SPORT_RUNNING = 1
+_SUB_SPORT_TRAIL = 3
 _WORKOUT_TARGET_SPEED = 0
 _WORKOUT_TARGET_OPEN = 2
 _INTENSITY_ACTIVE = 0
@@ -82,6 +83,25 @@ class Terrain(StrEnum):
 
     ROAD = "ROAD"
     TRAIL = "TRAIL"
+
+
+class TerrainSelection(StrEnum):
+    """The install-time choice of which terrain variants go to the watch.
+
+    BOTH installs the road and trail variant of every workout side by side so
+    the runner picks the matching pace on the watch itself — the core product
+    requirement that road and trail remain genuinely different choices.
+    """
+
+    ROAD = "ROAD"
+    TRAIL = "TRAIL"
+    BOTH = "BOTH"
+
+    @property
+    def terrains(self) -> tuple[Terrain, ...]:
+        if self is TerrainSelection.BOTH:
+            return tuple(Terrain)
+        return (Terrain(self.value),)
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +220,14 @@ def _encode_artifact(
                 _enum_field(4, _SPORT_RUNNING),
                 _uint16_field(6, 1),
                 _string_field(8, workout_name),
+                # TRAIL files declare the watch's trail-run activity so the
+                # watch can offer them as trail workouts; ROAD files stay
+                # byte-identical to earlier releases.
+                *(
+                    (_enum_field(11, _SUB_SPORT_TRAIL),)
+                    if terrain is Terrain.TRAIL
+                    else ()
+                ),
             ),
         ),
         _message(
@@ -298,6 +326,13 @@ def _identity_bytes(
             "alert_buffer_seconds": pace_band.alert_buffer_seconds,
             "seconds_per_mile": pace_band.seconds_per_mile,
         }
+    if terrain is Terrain.TRAIL:
+        # TRAIL bytes changed when they gained the trail-run activity type,
+        # so their identity must change with them: a new filename lets the
+        # installers replace an already-installed older trail file instead of
+        # refusing a same-name object whose content differs. ROAD files are
+        # byte-stable and keep their original identity.
+        document["activity"] = "trail_run"
     return json.dumps(
         document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")

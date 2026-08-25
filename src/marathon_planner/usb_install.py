@@ -24,6 +24,7 @@ from marathon_planner.fit_encoding import (
     FitEncodingError,
     FitWorkoutFile,
     Terrain,
+    TerrainSelection,
     encode_plan_workouts,
 )
 from marathon_planner.models import TrainingPlan
@@ -89,7 +90,7 @@ class UsbInstallPreview:
     destination: UsbWorkoutDestination
     start_week: int
     week_count: int
-    terrain: Terrain
+    terrain: TerrainSelection
     workout_count: int
     changes: tuple[UsbInstallChange, ...]
     manifest_content: bytes
@@ -187,7 +188,7 @@ def preview_usb_install(
     *,
     start_week: int,
     week_count: int,
-    terrain: Terrain | str,
+    terrain: TerrainSelection | Terrain | str,
 ) -> UsbInstallPreview:
     """Plan, but never apply, one explicit contiguous block installation."""
 
@@ -371,15 +372,15 @@ def _prepare_usb_install(
     *,
     start_week: int,
     week_count: int,
-    terrain: Terrain | str,
+    terrain: TerrainSelection | Terrain | str,
 ) -> _PreparedInstall:
     """Build a preview together with the verified state needed to apply it."""
 
     _validate_block(plan, start_week=start_week, week_count=week_count)
     try:
-        selected_terrain = Terrain(terrain)
+        selection = TerrainSelection(terrain)
     except (TypeError, ValueError) as error:
-        raise UsbInstallError("Terrain must be ROAD or TRAIL.") from error
+        raise UsbInstallError("Terrain must be ROAD, TRAIL, or BOTH.") from error
 
     destination = detect_usb_workout_destination(device_root)
     try:
@@ -391,7 +392,7 @@ def _prepare_usb_install(
         artifacts,
         start_week=start_week,
         week_count=week_count,
-        terrain=selected_terrain,
+        terrain=selection,
     )
 
     desired = _desired_files(destination, selected)
@@ -430,7 +431,7 @@ def _prepare_usb_install(
             destination=destination,
             start_week=start_week,
             week_count=week_count,
-            terrain=selected_terrain,
+            terrain=selection,
             workout_count=len(selected),
             changes=tuple(changes),
             manifest_content=manifest_content,
@@ -707,7 +708,7 @@ def _select_artifacts(
     *,
     start_week: int,
     week_count: int,
-    terrain: Terrain,
+    terrain: TerrainSelection,
 ) -> tuple[FitWorkoutFile, ...]:
     selected: list[FitWorkoutFile] = []
     artifact_index = 0
@@ -724,7 +725,9 @@ def _select_artifacts(
                     "Encoded workout terrain variants are incomplete."
                 )
             if start_week <= week_index <= ending_week:
-                selected.append(next(item for item in pair if item.terrain is terrain))
+                selected.extend(
+                    item for item in pair if item.terrain in terrain.terrains
+                )
     if artifact_index != len(artifacts):
         raise UsbInstallError("Encoded workout order does not match the open plan.")
     return tuple(selected)

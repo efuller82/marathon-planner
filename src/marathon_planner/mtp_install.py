@@ -18,6 +18,7 @@ import secrets
 from marathon_planner.fit_encoding import (
     FitEncodingError,
     Terrain,
+    TerrainSelection,
     encode_plan_workouts,
 )
 from marathon_planner.models import TrainingPlan
@@ -153,7 +154,7 @@ def build_mtp_desired_objects(
     *,
     start_week: int,
     week_count: int,
-    terrain: Terrain | str,
+    terrain: TerrainSelection | Terrain | str,
 ) -> tuple[MtpDesiredObject, ...]:
     """Encode one explicit plan block for the MTP planner.
 
@@ -177,9 +178,9 @@ def build_mtp_desired_objects(
             "The selected block extends past the end of the open plan."
         )
     try:
-        selected_terrain = Terrain(terrain)
+        selection = TerrainSelection(terrain)
     except (TypeError, ValueError) as error:
-        raise MtpInstallError("Terrain must be ROAD or TRAIL.") from error
+        raise MtpInstallError("Terrain must be ROAD, TRAIL, or BOTH.") from error
     try:
         artifacts = encode_plan_workouts(plan)
     except (FitEncodingError, ValueError) as error:
@@ -199,10 +200,11 @@ def build_mtp_desired_objects(
                     "Encoded workout terrain variants are incomplete."
                 )
             if start_week <= week_index <= ending_week:
-                selected = next(
-                    item for item in pair if item.terrain is selected_terrain
+                desired.extend(
+                    MtpDesiredObject(item.filename, item.data)
+                    for item in pair
+                    if item.terrain in selection.terrains
                 )
-                desired.append(MtpDesiredObject(selected.filename, selected.data))
     if artifact_index != len(artifacts):
         raise MtpInstallError(
             "Encoded workout order does not match the open plan."

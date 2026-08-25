@@ -6,6 +6,15 @@ workout choices, and package Garmin-compatible workouts for simple handoff.
 The desktop shell and core run-goal model are live; editing and export features
 are being built incrementally.
 
+**Core product requirement (owner-stated, 2026-08-25): the road and trail
+versions of a workout must be usable as genuinely different choices on the
+watch — different pace targets depending on whether the runner is doing a road
+run or a trail run. On the runner's watch, "Run" and "Trail Run" are separate
+activities, and the goal is that picking one gives the matching pace. Any
+design that collapses road and trail into one indistinguishable workout on the
+watch fails this requirement. Every terrain-related feature must be checked
+against it.**
+
 ## Start every session
 
 1. Read `STATUS.md` for what is live, where work stopped, and the exact next
