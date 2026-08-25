@@ -76,9 +76,9 @@ class PlanDocumentTests(unittest.TestCase):
 
     def test_unknown_version_is_rejected(self) -> None:
         document = synthetic_document()
-        document["schema_version"] = 2
+        document["schema_version"] = 3
 
-        with self.assertRaisesRegex(PlanImportError, "Unsupported"):
+        with self.assertRaisesRegex(PlanImportError, "expected 1 or 2"):
             parse_plan_document(document)
 
     def test_unknown_path_field_is_rejected(self) -> None:
@@ -123,6 +123,143 @@ class PlanDocumentTests(unittest.TestCase):
         document["weeks"][1]["workouts"][0]["date"] = "2030-04-03"
 
         with self.assertRaisesRegex(PlanImportError, "unique"):
+            parse_plan_document(document)
+
+
+def synthetic_paced_document() -> dict[str, object]:
+    document = synthetic_document()
+    document["schema_version"] = 2
+    document["pace_settings"] = {
+        "trail_adjustment_seconds": 90,
+        "alert_buffer_seconds": 30,
+    }
+    document["weeks"][0]["workouts"][0]["pace"] = {
+        "road_seconds_per_mile": 660,
+        "trail_seconds_per_mile": 765,
+        "alert_buffer_seconds": 45,
+    }
+    return document
+
+
+class PacedPlanDocumentTests(unittest.TestCase):
+    def test_version_2_preserves_pace_settings_and_overrides(self) -> None:
+        plan = parse_plan_document(synthetic_paced_document())
+
+        assert plan.pace_settings is not None
+        self.assertEqual(plan.pace_settings.trail_adjustment_seconds, 90)
+        self.assertEqual(plan.pace_settings.alert_buffer_seconds, 30)
+        paced = plan.weeks[0].workouts[0].pace
+        assert paced is not None
+        self.assertEqual(paced.road_seconds_per_mile, 660)
+        self.assertEqual(paced.trail_seconds_per_mile, 765)
+        self.assertEqual(paced.alert_buffer_seconds, 45)
+        self.assertIsNone(plan.weeks[1].workouts[0].pace)
+
+    def test_version_2_pace_overrides_are_optional(self) -> None:
+        document = synthetic_paced_document()
+        document["weeks"][0]["workouts"][0]["pace"] = {
+            "road_seconds_per_mile": 660
+        }
+
+        plan = parse_plan_document(document)
+
+        paced = plan.weeks[0].workouts[0].pace
+        assert paced is not None
+        self.assertEqual(paced.road_seconds_per_mile, 660)
+        self.assertIsNone(paced.trail_seconds_per_mile)
+        self.assertIsNone(paced.alert_buffer_seconds)
+
+    def test_version_2_without_pace_fields_imports(self) -> None:
+        document = synthetic_document()
+        document["schema_version"] = 2
+
+        plan = parse_plan_document(document)
+
+        self.assertIsNone(plan.pace_settings)
+
+    def test_version_1_rejects_a_workout_pace_field(self) -> None:
+        document = synthetic_document()
+        document["weeks"][0]["workouts"][0]["pace"] = {
+            "road_seconds_per_mile": 660
+        }
+
+        with self.assertRaisesRegex(PlanImportError, "version 1 schema"):
+            parse_plan_document(document)
+
+    def test_version_1_rejects_plan_pace_settings(self) -> None:
+        document = synthetic_document()
+        document["pace_settings"] = {
+            "trail_adjustment_seconds": 90,
+            "alert_buffer_seconds": 30,
+        }
+
+        with self.assertRaisesRegex(PlanImportError, "version 1 schema"):
+            parse_plan_document(document)
+
+    def test_paced_workout_requires_plan_pace_settings(self) -> None:
+        document = synthetic_paced_document()
+        del document["pace_settings"]
+
+        with self.assertRaisesRegex(
+            PlanImportError, "Week 1, workout 1.*road-to-trail adjustment"
+        ):
+            parse_plan_document(document)
+
+    def test_pace_values_must_be_whole_numbers(self) -> None:
+        for invalid in (660.5, "660", True):
+            document = synthetic_paced_document()
+            document["weeks"][0]["workouts"][0]["pace"][
+                "road_seconds_per_mile"
+            ] = invalid
+
+            with self.assertRaisesRegex(PlanImportError, "whole number"):
+                parse_plan_document(document)
+
+    def test_pace_range_bounds_are_enforced(self) -> None:
+        document = synthetic_paced_document()
+        document["weeks"][0]["workouts"][0]["pace"]["road_seconds_per_mile"] = 6000
+
+        with self.assertRaisesRegex(PlanImportError, "between 0:01 and 99:59"):
+            parse_plan_document(document)
+
+    def test_buffer_must_stay_smaller_than_both_paces(self) -> None:
+        document = synthetic_paced_document()
+        document["weeks"][0]["workouts"][0]["pace"] = {
+            "road_seconds_per_mile": 40,
+            "alert_buffer_seconds": 45,
+        }
+
+        with self.assertRaisesRegex(
+            PlanImportError, "smaller than both the road and trail pace"
+        ):
+            parse_plan_document(document)
+
+    def test_trail_pace_resolved_out_of_range_is_actionable(self) -> None:
+        document = synthetic_paced_document()
+        document["pace_settings"]["trail_adjustment_seconds"] = 3600
+        document["weeks"][0]["workouts"][0]["pace"] = {
+            "road_seconds_per_mile": 3000
+        }
+
+        with self.assertRaisesRegex(
+            PlanImportError, "trail pace works out to 6600"
+        ):
+            parse_plan_document(document)
+
+    def test_unknown_pace_field_is_rejected(self) -> None:
+        document = synthetic_paced_document()
+        document["weeks"][0]["workouts"][0]["pace"]["source_path"] = "x.json"
+
+        with self.assertRaisesRegex(PlanImportError, "version 2 schema"):
+            parse_plan_document(document)
+
+    def test_pace_requires_a_road_pace(self) -> None:
+        document = synthetic_paced_document()
+        document["weeks"][0]["workouts"][0]["pace"] = {
+            "trail_seconds_per_mile": 765
+        }
+
+        with self.assertRaisesRegex(PlanImportError, "version 2 schema"):
             parse_plan_document(document)
 
 

@@ -1,9 +1,10 @@
 """Strict, versioned import for local user-authored JSON plans.
 
-Version 1 accepts exactly the shape documented in README.md. Unknown fields are
-rejected so an imported document cannot smuggle path or future-version data
-through validation. The entire file becomes a ``TrainingPlan`` before callers
-replace any open editor state.
+Versions 1 and 2 accept exactly the shapes documented in README.md; version 2
+adds optional plan-level pace settings and optional per-workout pace targets.
+Unknown fields are rejected so an imported document cannot smuggle path or
+future-version data through validation. The entire file becomes a
+``TrainingPlan`` before callers replace any open editor state.
 """
 
 from __future__ import annotations
@@ -17,14 +18,16 @@ from typing import Any, NoReturn
 
 from marathon_planner.models import (
     GoalType,
+    PacePlanSettings,
     RunGoal,
     TrainingPlan,
     TrainingWeek,
     WeeklyWorkout,
+    WorkoutPace,
 )
 
 
-PLAN_FORMAT_VERSION = 1
+PLAN_FORMAT_VERSIONS = (1, 2)
 MAX_PLAN_BYTES = 1_000_000
 MAX_WEEKS = 104
 MAX_WORKOUTS_PER_WEEK = 21
@@ -92,18 +95,26 @@ def load_plan_file(path: str | os.PathLike[str]) -> TrainingPlan:
 
 
 def parse_plan_document(document: Any) -> TrainingPlan:
-    """Validate a decoded version-1 document and construct its full plan."""
+    """Validate a decoded version 1 or 2 document and construct its full plan."""
 
     root = _object(document, "Plan")
-    _exact_fields(root, {"schema_version", "weeks"}, "Plan")
-
+    if "schema_version" not in root:
+        raise PlanImportError("Plan fields do not match a supported schema.")
     version = root["schema_version"]
     if type(version) is not int:
         raise PlanImportError("Plan schema_version must be an integer.")
-    if version != PLAN_FORMAT_VERSION:
+    if version not in PLAN_FORMAT_VERSIONS:
         raise PlanImportError(
-            f"Unsupported plan schema_version; expected {PLAN_FORMAT_VERSION}."
+            "Unsupported plan schema_version; expected "
+            + " or ".join(str(known) for known in PLAN_FORMAT_VERSIONS)
+            + "."
         )
+    optional_root = {"pace_settings"} if version >= 2 else set()
+    _check_fields(root, {"schema_version", "weeks"}, optional_root, "Plan", version)
+
+    pace_settings = None
+    if "pace_settings" in root:
+        pace_settings = _parse_pace_settings(root["pace_settings"], version)
 
     weeks_value = root["weeks"]
     if not isinstance(weeks_value, list):
@@ -114,19 +125,40 @@ def parse_plan_document(document: Any) -> TrainingPlan:
         raise PlanImportError(f"Plan cannot contain more than {MAX_WEEKS} weeks.")
 
     weeks = tuple(
-        _parse_week(value, week_index)
+        _parse_week(value, week_index, version)
         for week_index, value in enumerate(weeks_value, start=1)
     )
     try:
-        return TrainingPlan(weeks)
+        return TrainingPlan(weeks, pace_settings=pace_settings)
     except ValueError as error:
         raise PlanImportError(str(error)) from error
 
 
-def _parse_week(value: Any, week_index: int) -> TrainingWeek:
+def _parse_pace_settings(value: Any, version: int) -> PacePlanSettings:
+    label = "Plan pace_settings"
+    settings = _object(value, label)
+    _check_fields(
+        settings,
+        {"trail_adjustment_seconds", "alert_buffer_seconds"},
+        set(),
+        label,
+        version,
+    )
+    try:
+        return PacePlanSettings(
+            _int(settings["trail_adjustment_seconds"], f"{label} trail_adjustment_seconds"),
+            _int(settings["alert_buffer_seconds"], f"{label} alert_buffer_seconds"),
+        )
+    except PlanImportError:
+        raise
+    except ValueError as error:
+        raise PlanImportError(f"{label}: {error}") from error
+
+
+def _parse_week(value: Any, week_index: int, version: int) -> TrainingWeek:
     label = f"Week {week_index}"
     week = _object(value, label)
-    _exact_fields(week, {"start_date", "workouts"}, label)
+    _check_fields(week, {"start_date", "workouts"}, set(), label, version)
     start_date = _date(week["start_date"], f"{label} start_date")
 
     workouts_value = week["workouts"]
@@ -140,10 +172,37 @@ def _parse_week(value: Any, week_index: int) -> TrainingWeek:
         )
 
     workouts = tuple(
-        _parse_workout(workout, label, workout_index, start_date)
+        _parse_workout(workout, label, workout_index, start_date, version)
         for workout_index, workout in enumerate(workouts_value, start=1)
     )
     return TrainingWeek(workouts, start_date=start_date)
+
+
+def _parse_workout_pace(value: Any, label: str, version: int) -> WorkoutPace:
+    pace = _object(value, label)
+    _check_fields(
+        pace,
+        {"road_seconds_per_mile"},
+        {"trail_seconds_per_mile", "alert_buffer_seconds"},
+        label,
+        version,
+    )
+    trail = None
+    if "trail_seconds_per_mile" in pace:
+        trail = _int(pace["trail_seconds_per_mile"], f"{label} trail_seconds_per_mile")
+    buffer = None
+    if "alert_buffer_seconds" in pace:
+        buffer = _int(pace["alert_buffer_seconds"], f"{label} alert_buffer_seconds")
+    try:
+        return WorkoutPace(
+            _int(pace["road_seconds_per_mile"], f"{label} road_seconds_per_mile"),
+            trail,
+            buffer,
+        )
+    except PlanImportError:
+        raise
+    except ValueError as error:
+        raise PlanImportError(f"{label}: {error}") from error
 
 
 def _parse_workout(
@@ -151,17 +210,23 @@ def _parse_workout(
     week_label: str,
     workout_index: int,
     week_start: date,
+    version: int,
 ) -> WeeklyWorkout:
     label = f"{week_label}, workout {workout_index}"
     workout = _object(value, label)
-    _exact_fields(workout, {"date", "title", "goal", "choices"}, label)
+    optional = {"pace"} if version >= 2 else set()
+    _check_fields(workout, {"date", "title", "goal", "choices"}, optional, label, version)
+
+    pace = None
+    if "pace" in workout:
+        pace = _parse_workout_pace(workout["pace"], f"{label} pace", version)
 
     workout_date = _date(workout["date"], f"{label} date")
     if not week_start <= workout_date <= week_start + timedelta(days=6):
         raise PlanImportError(f"{label} date must fall within its seven-day week.")
 
     goal_value = _object(workout["goal"], f"{label} goal")
-    _exact_fields(goal_value, {"type", "value", "unit"}, f"{label} goal")
+    _check_fields(goal_value, {"type", "value", "unit"}, set(), f"{label} goal", version)
     goal_type_text = _text(goal_value["type"], f"{label} goal type")
     try:
         goal_type = GoalType(goal_type_text)
@@ -176,7 +241,7 @@ def _parse_workout(
     unit = _text(goal_value["unit"], f"{label} goal unit")
 
     choices = _object(workout["choices"], f"{label} choices")
-    _exact_fields(choices, {"ROAD", "TRAIL"}, f"{label} choices")
+    _check_fields(choices, {"ROAD", "TRAIL"}, set(), f"{label} choices", version)
 
     try:
         return WeeklyWorkout(
@@ -185,6 +250,7 @@ def _parse_workout(
             goal=RunGoal(goal_type, numeric_value, unit),
             road_choice=_text(choices["ROAD"], f"{label} ROAD choice"),
             trail_choice=_text(choices["TRAIL"], f"{label} TRAIL choice"),
+            pace=pace,
         )
     except ValueError as error:
         raise PlanImportError(f"{label}: {error}") from error
@@ -209,9 +275,24 @@ def _object(value: Any, label: str) -> dict[str, Any]:
     return value
 
 
-def _exact_fields(value: dict[str, Any], expected: set[str], label: str) -> None:
-    if set(value) != expected:
-        raise PlanImportError(f"{label} fields do not match the version 1 schema.")
+def _check_fields(
+    value: dict[str, Any],
+    required: set[str],
+    optional: set[str],
+    label: str,
+    version: int,
+) -> None:
+    present = set(value)
+    if not (required <= present <= required | optional):
+        raise PlanImportError(
+            f"{label} fields do not match the version {version} schema."
+        )
+
+
+def _int(value: Any, label: str) -> int:
+    if type(value) is not int:
+        raise PlanImportError(f"{label} must be a whole number.")
+    return value
 
 
 def _text(value: Any, label: str) -> str:

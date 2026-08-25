@@ -131,6 +131,25 @@ class MtpInstallPlanningTests(unittest.TestCase):
                 terrain="ROAD",
             )
 
+        both = build_mtp_desired_objects(
+            plan,
+            start_week=2,
+            week_count=1,
+            terrain="BOTH",
+        )
+        self.assertEqual(len(both), 2)
+        self.assertIn("-road-", both[0].filename)
+        self.assertIn("-trail-", both[1].filename)
+        self.assertTrue(all("-w002-" in item.filename for item in both))
+
+        with self.assertRaisesRegex(MtpInstallError, "ROAD, TRAIL, or BOTH"):
+            build_mtp_desired_objects(
+                plan,
+                start_week=1,
+                week_count=1,
+                terrain="GRAVEL",
+            )
+
     def preview(
         self,
         *desired: MtpDesiredObject,

@@ -24,11 +24,14 @@ from marathon_planner.fit_encoding import (  # noqa: E402
 )
 from marathon_planner.models import (  # noqa: E402
     GoalType,
+    PacePlanSettings,
     RunGoal,
     TrainingPlan,
     TrainingWeek,
     WeeklyWorkout,
+    WorkoutPace,
 )
+from marathon_planner.plan_import import parse_plan_document  # noqa: E402
 from marathon_planner.plan_export import (  # noqa: E402
     PACKAGE_COMMENT,
     PlanPackageExportError,
@@ -74,6 +77,27 @@ def synthetic_plan(*, title: str = "Aerobic run") -> TrainingPlan:
             ),
         )
     )
+
+
+def synthetic_paced_plan() -> TrainingPlan:
+    base = synthetic_plan()
+    first_week = base.weeks[0]
+    paced = WeeklyWorkout(
+        day=first_week.workouts[0].day,
+        title=first_week.workouts[0].title,
+        goal=first_week.workouts[0].goal,
+        road_choice=first_week.workouts[0].road_choice,
+        trail_choice=first_week.workouts[0].trail_choice,
+        pace=WorkoutPace(660, 780, None),
+    )
+    weeks = (
+        TrainingWeek(
+            (paced, *first_week.workouts[1:]),
+            start_date=first_week.start_date,
+        ),
+        *base.weeks[1:],
+    )
+    return TrainingPlan(weeks, pace_settings=PacePlanSettings(90, 30))
 
 
 def read_archive(content: bytes) -> tuple[ZipFile, BytesIO]:
@@ -143,6 +167,36 @@ class PlanPackageBuildTests(unittest.TestCase):
             member = archive.read(path)
             self.assertEqual(entry["bytes"], len(member))
             self.assertEqual(entry["sha256"], sha256(member).hexdigest())
+
+    def test_paced_plan_exports_version_2_and_round_trips(self) -> None:
+        plan = synthetic_paced_plan()
+        archive, stream = read_archive(build_plan_package(plan))
+        self.addCleanup(archive.close)
+        self.addCleanup(stream.close)
+
+        document = json.loads(archive.read("plan.json"))
+        self.assertEqual(document["schema_version"], 2)
+        self.assertEqual(
+            document["pace_settings"],
+            {"trail_adjustment_seconds": 90, "alert_buffer_seconds": 30},
+        )
+        first = document["weeks"][0]["workouts"][0]
+        self.assertEqual(
+            first["pace"],
+            {"road_seconds_per_mile": 660, "trail_seconds_per_mile": 780},
+        )
+        self.assertNotIn("pace", document["weeks"][0]["workouts"][1])
+
+        self.assertEqual(parse_plan_document(document), plan)
+
+    def test_paceless_plan_still_exports_version_1(self) -> None:
+        archive, stream = read_archive(build_plan_package(synthetic_plan()))
+        self.addCleanup(archive.close)
+        self.addCleanup(stream.close)
+
+        document = json.loads(archive.read("plan.json"))
+        self.assertEqual(document["schema_version"], 1)
+        self.assertNotIn("pace_settings", document)
 
     def test_every_archived_fit_file_matches_the_open_plan_encoding(self) -> None:
         plan = synthetic_plan()

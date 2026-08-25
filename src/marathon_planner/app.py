@@ -11,8 +11,20 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
-from marathon_planner.editor import GOAL_UNITS, build_week, parse_workout
-from marathon_planner.models import GoalType, TrainingPlan, TrainingWeek, WeeklyWorkout
+from marathon_planner.editor import (
+    GOAL_UNITS,
+    build_week,
+    format_pace_seconds,
+    parse_pace_settings,
+    parse_workout,
+)
+from marathon_planner.models import (
+    GoalType,
+    PacePlanSettings,
+    TrainingPlan,
+    TrainingWeek,
+    WeeklyWorkout,
+)
 from marathon_planner.mtp_install import (
     FORERUNNER_265_PROVISIONAL_PROFILE,
     MtpDesiredObject,
@@ -78,17 +90,30 @@ file, or type one week of workouts directly into the table.
 arrows beside the week list to move between imported weeks; your edits \
 are kept when you switch.
 
-3. Choose "Validate week" to check every field of the visible week.
+3. Pace targets are optional. Give a workout a road pace as \
+minutes:seconds per mile (for example 11:00), then fill in the two plan \
+pace rules above the table: how many seconds per mile your trail pace \
+adds to your road pace, and how many seconds off pace the watch should \
+allow before alerting. ROAD files carry your road pace and TRAIL files \
+your trail pace, so the watch itself alerts when you leave the range. \
+Leave a workout's pace blank for no alerts, or type a trail pace or \
+alert seconds on one workout to override the plan rule for just that \
+workout. Your paces are never changed except by your own rules.
 
-4. "Export plan ZIP" writes one package with your complete plan, a \
+4. Choose "Validate week" to check every field of the visible week.
+
+5. "Export plan ZIP" writes one package with your complete plan, a \
 calendar, and ready-to-install workout files.
 
-5. To put workouts on your watch, connect it over USB, pick the start \
-week, the number of weeks, and ROAD or TRAIL, then choose "Preview USB \
-install". A read-only preview always opens first, and nothing is written \
-until you confirm that exact preview.
+6. To put workouts on your watch, connect it over USB, pick the start \
+week, the number of weeks, and the terrain, then choose "Preview USB \
+install". BOTH installs the road and the trail version of every workout \
+side by side, so on the watch you pick "ROAD: …" with your road pace or \
+"TRAIL: …" with your trail pace; choose ROAD or TRAIL alone to install \
+only that version. A read-only preview always opens first, and nothing \
+is written until you confirm that exact preview.
 
-6. A Forerunner 265 does not appear as a USB drive. On Windows, use \
+7. A Forerunner 265 does not appear as a USB drive. On Windows, use \
 "Preview connected Forerunner 265" in the same section with the same \
 weeks and terrain. If an installation is interrupted, reconnect the same \
 watch and choose "Recover interrupted installation" to finish it safely.
@@ -102,12 +127,15 @@ created itself."""
 # which columns absorb extra width.
 WORKOUT_COLUMNS: tuple[tuple[str, int, int], ...] = (
     ("Day", 90, 0),
-    ("Workout", 140, 2),
-    ("Goal", 92, 0),
-    ("Value", 56, 0),
-    ("Unit", 56, 0),
-    ("ROAD choice", 140, 3),
-    ("TRAIL choice", 140, 3),
+    ("Workout", 130, 2),
+    ("Goal", 88, 0),
+    ("Value", 52, 0),
+    ("Unit", 52, 0),
+    ("ROAD choice", 130, 3),
+    ("TRAIL choice", 130, 3),
+    ("Road pace", 64, 0),
+    ("Trail pace", 64, 0),
+    ("Alert ±sec", 60, 0),
     ("", 80, 0),
 )
 
@@ -221,6 +249,9 @@ class WorkoutRowEditor(ttk.Frame):
         self.unit = tk.StringVar(value=GOAL_UNITS[GoalType.DISTANCE][0])
         self.road_choice = tk.StringVar()
         self.trail_choice = tk.StringVar()
+        self.road_pace = tk.StringVar()
+        self.trail_pace = tk.StringVar()
+        self.alert_buffer = tk.StringVar()
 
         configure_workout_columns(self)
         gap = (0, _COLUMN_GAP)
@@ -253,11 +284,20 @@ class WorkoutRowEditor(ttk.Frame):
         ttk.Entry(self, textvariable=self.trail_choice, width=4).grid(
             row=0, column=6, sticky="ew", padx=gap
         )
+        ttk.Entry(self, textvariable=self.road_pace, width=4).grid(
+            row=0, column=7, sticky="ew", padx=gap
+        )
+        ttk.Entry(self, textvariable=self.trail_pace, width=4).grid(
+            row=0, column=8, sticky="ew", padx=gap
+        )
+        ttk.Entry(self, textvariable=self.alert_buffer, width=4).grid(
+            row=0, column=9, sticky="ew", padx=gap
+        )
         ttk.Button(
             self,
             text="Remove",
             command=lambda: self._on_remove(self),
-        ).grid(row=0, column=7, sticky="ew")
+        ).grid(row=0, column=10, sticky="ew")
 
         self.goal_type.trace_add("write", self._update_units)
         self._update_units()
@@ -279,6 +319,9 @@ class WorkoutRowEditor(ttk.Frame):
             unit=self.unit.get(),
             road_choice=self.road_choice.get(),
             trail_choice=self.trail_choice.get(),
+            road_pace=self.road_pace.get(),
+            trail_pace=self.trail_pace.get(),
+            alert_buffer=self.alert_buffer.get(),
         )
 
     def load_workout(self, workout: WeeklyWorkout) -> None:
@@ -291,6 +334,20 @@ class WorkoutRowEditor(ttk.Frame):
         self.unit.set(workout.goal.unit)
         self.road_choice.set(workout.road_choice)
         self.trail_choice.set(workout.trail_choice)
+        pace = workout.pace
+        self.road_pace.set(
+            "" if pace is None else format_pace_seconds(pace.road_seconds_per_mile)
+        )
+        self.trail_pace.set(
+            ""
+            if pace is None or pace.trail_seconds_per_mile is None
+            else format_pace_seconds(pace.trail_seconds_per_mile)
+        )
+        self.alert_buffer.set(
+            ""
+            if pace is None or pace.alert_buffer_seconds is None
+            else str(pace.alert_buffer_seconds)
+        )
 
 
 class WorkoutListView(ttk.Frame):
@@ -375,7 +432,7 @@ class MarathonPlannerApp(ttk.Frame):
         master.rowconfigure(0, weight=1)
         master.columnconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
+        self.rowconfigure(3, weight=1)
         self.rows: list[WorkoutRowEditor] = []
         self.open_plan: TrainingPlan | None = None
         self._displayed_week_index: int | None = None
@@ -424,8 +481,42 @@ class MarathonPlannerApp(ttk.Frame):
             anchor="e",
         ).grid(row=0, column=2, sticky="ew", padx=(16, 0))
 
+        pace_bar = ttk.Frame(self)
+        pace_bar.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        pace_bar.columnconfigure(6, weight=1)
+        ttk.Label(pace_bar, text="Plan pace rules:").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(pace_bar, text="trail adds").grid(
+            row=0, column=1, sticky="w", padx=(10, 4)
+        )
+        self.pace_adjustment = tk.StringVar()
+        ttk.Entry(pace_bar, textvariable=self.pace_adjustment, width=6).grid(
+            row=0, column=2, sticky="w"
+        )
+        ttk.Label(pace_bar, text="sec/mi to road pace,").grid(
+            row=0, column=3, sticky="w", padx=(4, 10)
+        )
+        ttk.Label(pace_bar, text="alert when off pace by ±").grid(
+            row=0, column=4, sticky="w"
+        )
+        self.pace_buffer = tk.StringVar()
+        ttk.Entry(pace_bar, textvariable=self.pace_buffer, width=6).grid(
+            row=0, column=5, sticky="w", padx=(4, 0)
+        )
+        pace_caption = ttk.Label(
+            pace_bar,
+            text=(
+                "sec. Needed only when a workout has a road pace; each "
+                "workout can override its trail pace or alert seconds."
+            ),
+            style="Caption.TLabel",
+            justify="left",
+        )
+        pace_caption.grid(row=0, column=6, sticky="ew", padx=(4, 0))
+
         editor = ttk.LabelFrame(self, text="Weekly workouts", padding=12)
-        editor.grid(row=2, column=0, sticky="nsew")
+        editor.grid(row=3, column=0, sticky="nsew")
         editor.columnconfigure(0, weight=1)
         editor.rowconfigure(1, weight=1)
 
@@ -470,7 +561,7 @@ class MarathonPlannerApp(ttk.Frame):
         install = ttk.LabelFrame(
             self, text="Install on your Garmin watch", padding=12
         )
-        install.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        install.grid(row=4, column=0, sticky="ew", pady=(12, 0))
         install.columnconfigure(0, weight=1)
 
         selection = ttk.Frame(install)
@@ -496,11 +587,11 @@ class MarathonPlannerApp(ttk.Frame):
             width=6,
         ).grid(row=0, column=3, sticky="w", padx=(6, 14))
         ttk.Label(selection, text="Terrain").grid(row=0, column=4, sticky="w")
-        self.usb_terrain = tk.StringVar(value="ROAD")
+        self.usb_terrain = tk.StringVar(value="BOTH")
         ttk.Combobox(
             selection,
             textvariable=self.usb_terrain,
-            values=("ROAD", "TRAIL"),
+            values=("BOTH", "ROAD", "TRAIL"),
             state="readonly",
             width=8,
         ).grid(row=0, column=5, sticky="w", padx=(6, 14))
@@ -544,7 +635,7 @@ class MarathonPlannerApp(ttk.Frame):
         _wrap_to_container(install, safety_caption, 28)
 
         status_bar = ttk.Frame(self)
-        status_bar.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        status_bar.grid(row=5, column=0, sticky="ew", pady=(12, 0))
         status_bar.columnconfigure(0, weight=1)
         ttk.Separator(status_bar).grid(row=0, column=0, sticky="ew")
         self.status = tk.StringVar(value=WELCOME_STATUS)
@@ -655,6 +746,13 @@ class MarathonPlannerApp(ttk.Frame):
             state="readonly",
         )
         self.week_selector.current(0)
+        settings = plan.pace_settings
+        self.pace_adjustment.set(
+            "" if settings is None else str(settings.trail_adjustment_seconds)
+        )
+        self.pace_buffer.set(
+            "" if settings is None else str(settings.alert_buffer_seconds)
+        )
         self.usb_start_week_input.configure(
             values=tuple(str(index) for index in range(1, total_weeks + 1)),
             state="readonly",
@@ -1255,12 +1353,19 @@ class MarathonPlannerApp(ttk.Frame):
             return week
         return TrainingWeek(week.workouts, start_date=start_date)
 
+    def _parse_plan_pace_settings(self) -> PacePlanSettings | None:
+        return parse_pace_settings(
+            trail_adjustment=self.pace_adjustment.get(),
+            alert_buffer=self.pace_buffer.get(),
+        )
+
     def _store_visible_imported_week(self) -> bool:
         if self.open_plan is None or self._displayed_week_index is None:
             return True
 
         current = self.open_plan.weeks[self._displayed_week_index]
         try:
+            settings = self._parse_plan_pace_settings()
             updated = self._build_visible_week(current.start_date)
         except ValueError as error:
             self.status.set(str(error))
@@ -1268,7 +1373,11 @@ class MarathonPlannerApp(ttk.Frame):
 
         weeks = list(self.open_plan.weeks)
         weeks[self._displayed_week_index] = updated
-        self.open_plan = TrainingPlan(tuple(weeks))
+        try:
+            self.open_plan = TrainingPlan(tuple(weeks), pace_settings=settings)
+        except ValueError as error:
+            self.status.set(str(error))
+            return False
         return True
 
     def validate_week(self) -> None:
@@ -1285,9 +1394,16 @@ class MarathonPlannerApp(ttk.Frame):
             self.status.set(str(error))
             return
         if self.open_plan is not None and self._displayed_week_index is not None:
-            weeks = list(self.open_plan.weeks)
-            weeks[self._displayed_week_index] = week
-            self.open_plan = TrainingPlan(tuple(weeks))
+            try:
+                settings = self._parse_plan_pace_settings()
+                weeks = list(self.open_plan.weeks)
+                weeks[self._displayed_week_index] = week
+                self.open_plan = TrainingPlan(
+                    tuple(weeks), pace_settings=settings
+                )
+            except ValueError as error:
+                self.status.set(str(error))
+                return
         self.status.set(f"Week is valid: {len(week.workouts)} workout(s).")
 
 

@@ -17,7 +17,15 @@ from hashlib import sha256
 import json
 import struct
 
-from marathon_planner.models import GoalType, RunGoal, TrainingPlan, WeeklyWorkout
+from marathon_planner.models import (
+    GoalType,
+    PacePlanSettings,
+    ResolvedPace,
+    RunGoal,
+    TrainingPlan,
+    WeeklyWorkout,
+    resolve_workout_pace,
+)
 
 
 FIT_PROTOCOL_VERSION = 0x20
@@ -28,10 +36,14 @@ FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
 _FILE_TYPE_WORKOUT = 5
 _MANUFACTURER_DEVELOPMENT = 255
 _SPORT_RUNNING = 1
+_SUB_SPORT_TRAIL = 3
+_WORKOUT_TARGET_SPEED = 0
 _WORKOUT_TARGET_OPEN = 2
 _INTENSITY_ACTIVE = 0
 _DURATION_TIME = 0
 _DURATION_DISTANCE = 1
+
+_METRES_PER_MILE = Decimal("1609.344")
 
 _BASE_ENUM = 0x00
 _BASE_UINT16 = 0x84
@@ -73,6 +85,25 @@ class Terrain(StrEnum):
     TRAIL = "TRAIL"
 
 
+class TerrainSelection(StrEnum):
+    """The install-time choice of which terrain variants go to the watch.
+
+    BOTH installs the road and trail variant of every workout side by side so
+    the runner picks the matching pace on the watch itself — the core product
+    requirement that road and trail remain genuinely different choices.
+    """
+
+    ROAD = "ROAD"
+    TRAIL = "TRAIL"
+    BOTH = "BOTH"
+
+    @property
+    def terrains(self) -> tuple[Terrain, ...]:
+        if self is TerrainSelection.BOTH:
+            return tuple(Terrain)
+        return (Terrain(self.value),)
+
+
 @dataclass(frozen=True, slots=True)
 class FitWorkoutFile:
     """One complete, local FIT artifact ready for a later package export."""
@@ -107,6 +138,7 @@ def encode_plan_workouts(plan: TrainingPlan) -> tuple[FitWorkoutFile, ...]:
                         workout_index=workout_index,
                         file_number=file_number,
                         terrain=terrain,
+                        pace_settings=plan.pace_settings,
                     )
                 )
                 file_number += 1
@@ -121,10 +153,12 @@ def _encode_artifact(
     workout_index: int,
     file_number: int,
     terrain: Terrain,
+    pace_settings: PacePlanSettings | None,
 ) -> FitWorkoutFile:
     choice = workout.road_choice if terrain is Terrain.ROAD else workout.trail_choice
     _validate_text(workout.title, "Workout title")
     _validate_text(choice, f"{terrain.value} choice")
+    pace_band = _terrain_pace_band(workout, terrain, pace_settings)
 
     identity = _identity_bytes(
         workout,
@@ -132,6 +166,7 @@ def _encode_artifact(
         workout_index=workout_index,
         terrain=terrain,
         choice=choice,
+        pace_band=pace_band,
     )
     digest = sha256(identity).digest()
     digest_text = digest.hex()[:16]
@@ -151,6 +186,19 @@ def _encode_artifact(
     notes = _fit_string(
         f"{terrain.value} choice: {choice}", _MAX_FIT_STRING_BYTES
     )
+
+    if pace_band is None:
+        target_fields = (
+            _enum_field(3, _WORKOUT_TARGET_OPEN),
+            _uint32_field(4, 0),
+        )
+    else:
+        target_fields = (
+            _enum_field(3, _WORKOUT_TARGET_SPEED),
+            _uint32_field(4, 0),
+            _uint32_field(5, pace_band.low_mm_per_second),
+            _uint32_field(6, pace_band.high_mm_per_second),
+        )
 
     messages = (
         _message(
@@ -172,6 +220,14 @@ def _encode_artifact(
                 _enum_field(4, _SPORT_RUNNING),
                 _uint16_field(6, 1),
                 _string_field(8, workout_name),
+                # TRAIL files declare the watch's trail-run activity so the
+                # watch can offer them as trail workouts; ROAD files stay
+                # byte-identical to earlier releases.
+                *(
+                    (_enum_field(11, _SUB_SPORT_TRAIL),)
+                    if terrain is Terrain.TRAIL
+                    else ()
+                ),
             ),
         ),
         _message(
@@ -182,8 +238,7 @@ def _encode_artifact(
                 _string_field(0, step_name),
                 _enum_field(1, duration_type),
                 _uint32_field(2, duration_value),
-                _enum_field(3, _WORKOUT_TARGET_OPEN),
-                _uint32_field(4, 0),
+                *target_fields,
                 _enum_field(7, _INTENSITY_ACTIVE),
                 _string_field(8, notes),
             ),
@@ -193,6 +248,55 @@ def _encode_artifact(
     return FitWorkoutFile(workout_id, filename, terrain, data)
 
 
+@dataclass(frozen=True, slots=True)
+class _PaceBand:
+    """The exact alert range one terrain variant encodes."""
+
+    seconds_per_mile: int
+    alert_buffer_seconds: int
+    low_mm_per_second: int
+    high_mm_per_second: int
+
+
+def _terrain_pace_band(
+    workout: WeeklyWorkout,
+    terrain: Terrain,
+    pace_settings: PacePlanSettings | None,
+) -> _PaceBand | None:
+    if workout.pace is None:
+        return None
+    if pace_settings is None:
+        raise FitEncodingError(
+            "A paced workout requires the plan's road-to-trail adjustment and "
+            "pace alert buffer before FIT encoding."
+        )
+    resolved: ResolvedPace = resolve_workout_pace(workout.pace, pace_settings)
+    pace_seconds = (
+        resolved.road_seconds_per_mile
+        if terrain is Terrain.ROAD
+        else resolved.trail_seconds_per_mile
+    )
+    buffer = resolved.alert_buffer_seconds
+    if pace_seconds - buffer < 1:
+        raise FitEncodingError(
+            "The pace alert buffer must be smaller than the "
+            f"{terrain.value} pace."
+        )
+    low = _pace_speed_mm_per_second(pace_seconds + buffer)
+    high = _pace_speed_mm_per_second(pace_seconds - buffer)
+    if low >= high:
+        raise FitEncodingError("The pace alert range is too narrow to encode.")
+    return _PaceBand(pace_seconds, buffer, low, high)
+
+
+def _pace_speed_mm_per_second(pace_seconds_per_mile: int) -> int:
+    raw = _METRES_PER_MILE * Decimal(1000) / Decimal(pace_seconds_per_mile)
+    encoded = int(raw.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    if encoded <= 0 or encoded >= 0xFFFFFFFF:
+        raise FitEncodingError("Workout pace is outside the FIT speed range.")
+    return encoded
+
+
 def _identity_bytes(
     workout: WeeklyWorkout,
     *,
@@ -200,6 +304,7 @@ def _identity_bytes(
     workout_index: int,
     terrain: Terrain,
     choice: str,
+    pace_band: _PaceBand | None,
 ) -> bytes:
     document = {
         "choice": choice,
@@ -214,6 +319,20 @@ def _identity_bytes(
         "week_index": week_index,
         "workout_index": workout_index,
     }
+    if pace_band is not None:
+        # Only paced workouts add this key, so every paceless workout keeps
+        # the exact identity, filename, and ownership digest it has today.
+        document["pace"] = {
+            "alert_buffer_seconds": pace_band.alert_buffer_seconds,
+            "seconds_per_mile": pace_band.seconds_per_mile,
+        }
+    if terrain is Terrain.TRAIL:
+        # TRAIL bytes changed when they gained the trail-run activity type,
+        # so their identity must change with them: a new filename lets the
+        # installers replace an already-installed older trail file instead of
+        # refusing a same-name object whose content differs. ROAD files are
+        # byte-stable and keep their original identity.
+        document["activity"] = "trail_run"
     return json.dumps(
         document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")

@@ -11,10 +11,14 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from marathon_planner.models import (  # noqa: E402
     GoalType,
+    PacePlanSettings,
+    ResolvedPace,
     RunGoal,
     TrainingPlan,
     TrainingWeek,
     WeeklyWorkout,
+    WorkoutPace,
+    resolve_workout_pace,
 )
 
 
@@ -78,6 +82,101 @@ class TrainingWeekTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "unique"):
             TrainingPlan((week, week))
+
+
+class PaceModelTests(unittest.TestCase):
+    def make_paced_workout(self, pace: WorkoutPace | None) -> WeeklyWorkout:
+        return WeeklyWorkout(
+            day="2030-04-02",
+            title="Paced run",
+            goal=RunGoal(GoalType.DISTANCE, 5, "mi"),
+            road_choice="Flat loop",
+            trail_choice="Rolling loop",
+            pace=pace,
+        )
+
+    def make_plan(
+        self,
+        pace: WorkoutPace | None,
+        settings: PacePlanSettings | None,
+    ) -> TrainingPlan:
+        week = TrainingWeek(
+            (self.make_paced_workout(pace),), start_date=date(2030, 4, 1)
+        )
+        return TrainingPlan((week,), pace_settings=settings)
+
+    def test_workout_pace_defaults_leave_overrides_unset(self) -> None:
+        pace = WorkoutPace(660)
+
+        self.assertEqual(pace.road_seconds_per_mile, 660)
+        self.assertIsNone(pace.trail_seconds_per_mile)
+        self.assertIsNone(pace.alert_buffer_seconds)
+
+    def test_road_pace_bounds_are_enforced(self) -> None:
+        for invalid in (0, 6000, -1):
+            with self.assertRaisesRegex(ValueError, "between 0:01 and 99:59"):
+                WorkoutPace(invalid)
+
+    def test_pace_values_reject_non_integers(self) -> None:
+        with self.assertRaisesRegex(ValueError, "whole number"):
+            WorkoutPace(660.0)
+        with self.assertRaisesRegex(ValueError, "whole number"):
+            WorkoutPace(660, alert_buffer_seconds=True)
+
+    def test_buffer_bounds_are_enforced(self) -> None:
+        for invalid in (0, 601):
+            with self.assertRaisesRegex(ValueError, "between 1 and 600"):
+                WorkoutPace(660, alert_buffer_seconds=invalid)
+            with self.assertRaisesRegex(ValueError, "between 1 and 600"):
+                PacePlanSettings(90, invalid)
+
+    def test_adjustment_bounds_are_enforced(self) -> None:
+        with self.assertRaisesRegex(ValueError, "between -3600 and 3600"):
+            PacePlanSettings(3601, 30)
+        self.assertEqual(PacePlanSettings(-120, 30).trail_adjustment_seconds, -120)
+
+    def test_resolve_uses_plan_rules_when_no_overrides(self) -> None:
+        resolved = resolve_workout_pace(
+            WorkoutPace(660), PacePlanSettings(90, 30)
+        )
+
+        self.assertEqual(resolved, ResolvedPace(660, 750, 30))
+
+    def test_resolve_prefers_authored_overrides(self) -> None:
+        resolved = resolve_workout_pace(
+            WorkoutPace(660, 780, 45), PacePlanSettings(90, 30)
+        )
+
+        self.assertEqual(resolved, ResolvedPace(660, 780, 45))
+
+    def test_plan_accepts_a_valid_paced_workout(self) -> None:
+        plan = self.make_plan(WorkoutPace(660), PacePlanSettings(90, 30))
+
+        self.assertIsNotNone(plan.pace_settings)
+
+    def test_paced_workout_without_plan_settings_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "Week 1, workout 1.*road-to-trail adjustment"
+        ):
+            self.make_plan(WorkoutPace(660), None)
+
+    def test_paceless_plan_never_requires_settings(self) -> None:
+        plan = self.make_plan(None, None)
+
+        self.assertIsNone(plan.pace_settings)
+
+    def test_resolved_trail_pace_must_stay_in_range(self) -> None:
+        with self.assertRaisesRegex(ValueError, "trail pace works out to 6100"):
+            self.make_plan(WorkoutPace(2500), PacePlanSettings(3600, 30))
+
+    def test_buffer_must_be_smaller_than_both_terrain_paces(self) -> None:
+        with self.assertRaisesRegex(ValueError, "smaller than both"):
+            self.make_plan(
+                WorkoutPace(40, alert_buffer_seconds=45),
+                PacePlanSettings(90, 30),
+            )
+        with self.assertRaisesRegex(ValueError, "smaller than both"):
+            self.make_plan(WorkoutPace(660, 25), PacePlanSettings(90, 30))
 
 
 if __name__ == "__main__":
