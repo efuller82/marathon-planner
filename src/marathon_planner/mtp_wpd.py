@@ -569,7 +569,10 @@ class WpdMtpSession:
                     raise MtpError("WPD readback ended before the declared byte count.")
             eof = self._facade.read_stream(stream, 1)
             _validate_read_result(eof, 1)
-            if eof.hresult != S_FALSE or eof.count != 0 or eof.data:
+            # Physical devices report end of stream with either success
+            # status; zero returned bytes is the end-of-stream proof, and any
+            # returned byte still means the object outgrew its declared size.
+            if eof.count != 0 or eof.data:
                 raise MtpError("WPD readback exceeded the declared byte count.")
         except WpdCallError as error:
             raise _mapped_error(error, "default-resource read") from error
@@ -657,8 +660,10 @@ def _validate_read_result(result: WpdTransferResult, requested: int) -> None:
         raise MtpError("WPD read returned an unexpected success status.")
     if result.count != len(result.data) or result.count > requested:
         raise MtpError("WPD read returned an inconsistent byte count.")
-    if result.hresult == S_OK and result.count != requested:
-        raise MtpError("WPD read returned a short successful transfer.")
+    # The stream read contract permits a successful read to return fewer
+    # bytes than requested before the end of the stream; physical WPD
+    # devices do this routinely, so the caller must keep reading until the
+    # declared size is reached instead of requiring exact chunk counts.
 
 
 def _required_property(

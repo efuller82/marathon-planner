@@ -107,6 +107,8 @@ class FakeWpdFacade:
         self.written = bytearray()
         self.read_data = b"0123456789"
         self.read_offset = 0
+        self.read_chunk_limit: int | None = None
+        self.read_eof_hresult = S_FALSE
         self.delete_result = WpdDeleteResult(S_OK, S_OK)
 
     @staticmethod
@@ -213,9 +215,14 @@ class FakeWpdFacade:
 
     def read_stream(self, stream: object, count: int) -> WpdTransferResult:
         self._call("read_stream", stream, count)
-        chunk = self.read_data[self.read_offset : self.read_offset + count]
+        limit = count if self.read_chunk_limit is None else min(
+            count, self.read_chunk_limit
+        )
+        chunk = self.read_data[self.read_offset : self.read_offset + limit]
         self.read_offset += len(chunk)
-        status = S_OK if len(chunk) == count else S_FALSE
+        status = S_OK if len(chunk) == limit else S_FALSE
+        if not chunk:
+            status = self.read_eof_hresult
         return WpdTransferResult(status, len(chunk), chunk)
 
     def delete_object_no_recursion(
@@ -392,6 +399,34 @@ class WpdAdapterTests(unittest.TestCase):
                 ("read_stream", "read-stream", 1),
             ],
         )
+        self.assertEqual(self.facade.calls[-1], ("release", "read-stream"))
+
+    def test_readback_accepts_short_successful_chunks(self) -> None:
+        self.facade.read_chunk_limit = 3
+        self.facade.calls.clear()
+
+        result = self.session.read_file("file", max_bytes=10)
+
+        self.assertEqual(result.data, b"0123456789")
+        self.assertEqual(result.size, 10)
+        self.assertEqual(
+            [call for call in self.facade.calls if call[0] == "read_stream"],
+            [
+                ("read_stream", "read-stream", 4),
+                ("read_stream", "read-stream", 4),
+                ("read_stream", "read-stream", 4),
+                ("read_stream", "read-stream", 1),
+                ("read_stream", "read-stream", 1),
+            ],
+        )
+        self.assertEqual(self.facade.calls[-1], ("release", "read-stream"))
+
+    def test_readback_accepts_success_status_at_end_of_stream(self) -> None:
+        self.facade.read_eof_hresult = S_OK
+
+        result = self.session.read_file("file", max_bytes=10)
+
+        self.assertEqual(result.data, b"0123456789")
         self.assertEqual(self.facade.calls[-1], ("release", "read-stream"))
 
     def test_readback_rejects_size_overflow_short_stream_and_invalid_buffer(self) -> None:
