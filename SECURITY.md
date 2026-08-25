@@ -31,6 +31,8 @@ owner's explicit approval and a documented issue decision before implementation.
 
 ## Known gaps
 
-- FIT generation has not yet been validated on physical Garmin hardware.
-- Safe identification and rotation of application-owned workouts on an MTP
-  device has not yet been implemented or independently tested.
+- The mounted mass-storage installer has not yet been validated on a physical
+  Garmin device (issue #11); the owner's available watch exposes only MTP.
+- The Windows MTP path and its generated FIT workouts passed the owner-run
+  physical Forerunner 265 check required by issue #12 on 2026-08-24. Other
+  Garmin models, storage topologies, and operating systems remain unverified.

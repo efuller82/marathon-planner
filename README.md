@@ -113,8 +113,27 @@ file. A missing prior file is treated as already consumed by the device. A
 tampered managed file, malformed manifest, unsafe path, symbolic link, or
 unrelated file collision blocks the preview rather than guessing. Unrelated
 device files are never proposed for replacement or removal. Physical-device
-compatibility and application of the preview remain unverified and
-unimplemented.
+compatibility remains unverified.
+
+## Windows MTP installation
+
+The separate Windows MTP action previews and applies the selected contiguous
+week block to the verified Forerunner 265 destination
+`Internal Storage/GARMIN/NewFiles`. It uses Windows Portable Devices directly,
+never requests Garmin credentials, and does not fall back to the mounted-drive
+installer. The Forerunner 265 profile passed issue #12's owner-run
+synthetic-device check; other Garmin models remain unsupported.
+
+MTP is the only feature with an optional third-party dependency. On Windows,
+install the reviewed, MIT-licensed `comtypes` wheel from the hash-pinned file:
+
+```powershell
+python -m pip install --require-hashes -r requirements-windows-mtp.txt
+```
+
+The dependency has no required dependencies or recurring service cost. It is
+loaded only when a Windows MTP operation begins; plan editing, export, mounted
+USB installation, and the synthetic test gate remain standard-library-only.
 
 ## Run locally
 
