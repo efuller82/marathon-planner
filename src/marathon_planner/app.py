@@ -516,7 +516,7 @@ class MarathonPlannerApp(ttk.Frame):
         mtp_path.grid(row=1, column=0, sticky="w", pady=(8, 0))
         ttk.Label(
             mtp_path,
-            text="Forerunner 265 (Windows, provisional)",
+            text="Forerunner 265 (Windows)",
         ).grid(row=0, column=0, sticky="w")
         self.mtp_preview_button = ttk.Button(
             mtp_path,

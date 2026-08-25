@@ -118,11 +118,11 @@ compatibility remains unverified.
 ## Windows MTP installation
 
 The separate Windows MTP action previews and applies the selected contiguous
-week block to the provisional Forerunner 265 destination
+week block to the verified Forerunner 265 destination
 `Internal Storage/GARMIN/NewFiles`. It uses Windows Portable Devices directly,
 never requests Garmin credentials, and does not fall back to the mounted-drive
-installer. Physical compatibility remains unverified until the owner completes
-issue #12's synthetic-device check.
+installer. The Forerunner 265 profile passed issue #12's owner-run
+synthetic-device check; other Garmin models remain unsupported.
 
 MTP is the only feature with an optional third-party dependency. On Windows,
 install the reviewed, MIT-licensed `comtypes` wheel from the hash-pinned file:
