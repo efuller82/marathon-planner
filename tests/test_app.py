@@ -38,10 +38,12 @@ from marathon_planner.app import (  # noqa: E402
 )
 from marathon_planner.models import (  # noqa: E402
     GoalType,
+    PacePlanSettings,
     RunGoal,
     TrainingPlan,
     TrainingWeek,
     WeeklyWorkout,
+    WorkoutPace,
 )
 from marathon_planner.mtp_install import (  # noqa: E402
     MtpDesiredObject,
@@ -82,6 +84,10 @@ class WeeklyEditorActionTests(unittest.TestCase):
         app.usb_week_count.get.return_value = "1"
         app.usb_terrain = Mock()
         app.usb_terrain.get.return_value = "ROAD"
+        app.pace_adjustment = Mock()
+        app.pace_adjustment.get.return_value = ""
+        app.pace_buffer = Mock()
+        app.pace_buffer.get.return_value = ""
         return app
 
     def make_workout(self) -> WeeklyWorkout:
@@ -139,6 +145,76 @@ class WeeklyEditorActionTests(unittest.TestCase):
             app.status.value,
             "Fix workout 1: Goal value must be a number.",
         )
+
+    def test_store_visible_week_applies_plan_pace_rules(self) -> None:
+        app = self.make_app()
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 1)),)
+        )
+        app._displayed_week_index = 0
+        app.pace_adjustment.get.return_value = "90"
+        app.pace_buffer.get.return_value = "30"
+        paced = WeeklyWorkout(
+            day="2030-04-02",
+            title="Paced run",
+            goal=RunGoal(GoalType.DISTANCE, 5, "mi"),
+            road_choice="Paved loop",
+            trail_choice="Wooded loop",
+            pace=WorkoutPace(660),
+        )
+        row = Mock()
+        row.to_workout.return_value = paced
+        app.rows = [row]
+
+        stored = app._store_visible_imported_week()
+
+        self.assertTrue(stored)
+        assert app.open_plan is not None
+        self.assertEqual(
+            app.open_plan.pace_settings, PacePlanSettings(90, 30)
+        )
+        self.assertEqual(app.open_plan.weeks[0].workouts[0].pace, WorkoutPace(660))
+
+    def test_store_visible_week_reports_missing_pace_rules(self) -> None:
+        app = self.make_app()
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 1)),)
+        )
+        app._displayed_week_index = 0
+        paced = WeeklyWorkout(
+            day="2030-04-02",
+            title="Paced run",
+            goal=RunGoal(GoalType.DISTANCE, 5, "mi"),
+            road_choice="Paved loop",
+            trail_choice="Wooded loop",
+            pace=WorkoutPace(660),
+        )
+        row = Mock()
+        row.to_workout.return_value = paced
+        app.rows = [row]
+        original_plan = app.open_plan
+
+        stored = app._store_visible_imported_week()
+
+        self.assertFalse(stored)
+        self.assertIs(app.open_plan, original_plan)
+        self.assertIn("road-to-trail adjustment", app.status.value)
+
+    def test_store_visible_week_reports_half_entered_pace_rules(self) -> None:
+        app = self.make_app()
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 1)),)
+        )
+        app._displayed_week_index = 0
+        app.pace_adjustment.get.return_value = "90"
+        row = Mock()
+        row.to_workout.return_value = self.make_workout()
+        app.rows = [row]
+
+        stored = app._store_visible_imported_week()
+
+        self.assertFalse(stored)
+        self.assertIn("or leave both blank", app.status.value)
 
     def test_invalid_import_does_not_replace_open_rows(self) -> None:
         app = self.make_app()
@@ -760,7 +836,7 @@ class WorkoutColumnLayoutTests(unittest.TestCase):
         self.assertEqual(
             headings,
             ("Day", "Workout", "Goal", "Value", "Unit", "ROAD choice",
-             "TRAIL choice", ""),
+             "TRAIL choice", "Road pace", "Trail pace", "Alert ±sec", ""),
         )
         for heading, minsize, weight in WORKOUT_COLUMNS:
             self.assertGreater(minsize, 0, heading)

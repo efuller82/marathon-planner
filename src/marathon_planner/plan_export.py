@@ -33,7 +33,7 @@ from marathon_planner.fit_encoding import (
     Terrain,
     encode_plan_workouts,
 )
-from marathon_planner.models import TrainingPlan
+from marathon_planner.models import TrainingPlan, WeeklyWorkout
 
 
 PACKAGE_FORMAT = "marathon-planner-plan-package"
@@ -217,32 +217,52 @@ def _validate_entries(entries: Iterable[tuple[str, bytes]]) -> None:
 
 
 def _plan_json(plan: TrainingPlan) -> bytes:
-    document = {
-        "schema_version": 1,
-        "weeks": [
-            {
-                "start_date": week.start_date.isoformat(),
-                "workouts": [
-                    {
-                        "date": workout.day,
-                        "title": workout.title,
-                        "goal": {
-                            "type": workout.goal.goal_type.value,
-                            "value": workout.goal.value,
-                            "unit": workout.goal.unit,
-                        },
-                        "choices": {
-                            "ROAD": workout.road_choice,
-                            "TRAIL": workout.trail_choice,
-                        },
-                    }
-                    for workout in week.workouts
-                ],
-            }
-            for week in plan.weeks
-        ],
+    # A plan without pace settings exports the byte-identical version 1
+    # document it always has; pace settings alone move it to version 2.
+    document: dict[str, object] = {
+        "schema_version": 1 if plan.pace_settings is None else 2,
     }
+    if plan.pace_settings is not None:
+        document["pace_settings"] = {
+            "trail_adjustment_seconds": plan.pace_settings.trail_adjustment_seconds,
+            "alert_buffer_seconds": plan.pace_settings.alert_buffer_seconds,
+        }
+    document["weeks"] = [
+        {
+            "start_date": week.start_date.isoformat(),
+            "workouts": [
+                _workout_json(workout) for workout in week.workouts
+            ],
+        }
+        for week in plan.weeks
+    ]
     return _json_bytes(document)
+
+
+def _workout_json(workout: WeeklyWorkout) -> dict[str, object]:
+    document: dict[str, object] = {
+        "date": workout.day,
+        "title": workout.title,
+        "goal": {
+            "type": workout.goal.goal_type.value,
+            "value": workout.goal.value,
+            "unit": workout.goal.unit,
+        },
+        "choices": {
+            "ROAD": workout.road_choice,
+            "TRAIL": workout.trail_choice,
+        },
+    }
+    if workout.pace is not None:
+        pace: dict[str, int] = {
+            "road_seconds_per_mile": workout.pace.road_seconds_per_mile,
+        }
+        if workout.pace.trail_seconds_per_mile is not None:
+            pace["trail_seconds_per_mile"] = workout.pace.trail_seconds_per_mile
+        if workout.pace.alert_buffer_seconds is not None:
+            pace["alert_buffer_seconds"] = workout.pace.alert_buffer_seconds
+        document["pace"] = pace
+    return document
 
 
 def _manifest(

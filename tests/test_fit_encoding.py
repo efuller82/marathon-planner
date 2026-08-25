@@ -21,10 +21,12 @@ from marathon_planner.fit_encoding import (  # noqa: E402
 )
 from marathon_planner.models import (  # noqa: E402
     GoalType,
+    PacePlanSettings,
     RunGoal,
     TrainingPlan,
     TrainingWeek,
     WeeklyWorkout,
+    WorkoutPace,
 )
 
 
@@ -283,6 +285,98 @@ class FitEncodingTests(unittest.TestCase):
 
         self.assertLessEqual(len(step[8]), 255)
         self.assertTrue(text(step[8]).endswith("..."))
+
+
+def synthetic_paced_plan(pace: WorkoutPace) -> TrainingPlan:
+    workout = WeeklyWorkout(
+        day="2030-04-02",
+        title="Paced run",
+        goal=RunGoal(GoalType.DISTANCE, 5, "mi"),
+        road_choice="Flat loop",
+        trail_choice="Rolling loop",
+        pace=pace,
+    )
+    return TrainingPlan(
+        (TrainingWeek((workout,), start_date=date(2030, 4, 1)),),
+        pace_settings=PacePlanSettings(90, 30),
+    )
+
+
+class PacedFitEncodingTests(unittest.TestCase):
+    def step_fields(self, data: bytes) -> dict[int, bytes]:
+        return next(fields for number, fields in parse_fit(data) if number == 27)
+
+    def test_paced_workout_encodes_terrain_speed_bands(self) -> None:
+        # Road 11:00/mi ± 30 s; trail defaults to 12:30/mi via the +90 rule.
+        road, trail = encode_plan_workouts(synthetic_paced_plan(WorkoutPace(660)))
+
+        road_step = self.step_fields(road.data)
+        self.assertEqual(road_step[3], b"\x00")
+        self.assertEqual(uint32(road_step[4]), 0)
+        self.assertEqual(uint32(road_step[5]), 2332)
+        self.assertEqual(uint32(road_step[6]), 2555)
+
+        trail_step = self.step_fields(trail.data)
+        self.assertEqual(trail_step[3], b"\x00")
+        self.assertEqual(uint32(trail_step[5]), 2063)
+        self.assertEqual(uint32(trail_step[6]), 2235)
+
+    def test_authored_overrides_replace_the_plan_rules(self) -> None:
+        road, trail = encode_plan_workouts(
+            synthetic_paced_plan(WorkoutPace(660, 780, 45))
+        )
+
+        road_step = self.step_fields(road.data)
+        self.assertEqual(uint32(road_step[5]), 2283)
+        self.assertEqual(uint32(road_step[6]), 2617)
+
+        trail_step = self.step_fields(trail.data)
+        self.assertEqual(uint32(trail_step[5]), 1951)
+        self.assertEqual(uint32(trail_step[6]), 2190)
+
+    def test_paceless_workout_keeps_the_open_target_shape(self) -> None:
+        road, *_ = encode_plan_workouts(synthetic_plan())
+
+        step = self.step_fields(road.data)
+        self.assertEqual(step[3], b"\x02")
+        self.assertNotIn(5, step)
+        self.assertNotIn(6, step)
+
+    def test_pace_changes_the_filename_identity(self) -> None:
+        paceless_plan = TrainingPlan(
+            (
+                TrainingWeek(
+                    (
+                        WeeklyWorkout(
+                            day="2030-04-02",
+                            title="Paced run",
+                            goal=RunGoal(GoalType.DISTANCE, 5, "mi"),
+                            road_choice="Flat loop",
+                            trail_choice="Rolling loop",
+                        ),
+                    ),
+                    start_date=date(2030, 4, 1),
+                ),
+            )
+        )
+        paceless = encode_plan_workouts(paceless_plan)
+        paced = encode_plan_workouts(synthetic_paced_plan(WorkoutPace(660)))
+
+        self.assertNotEqual(paceless[0].filename, paced[0].filename)
+        self.assertNotEqual(paceless[1].filename, paced[1].filename)
+
+    def test_paced_output_is_deterministic(self) -> None:
+        first = encode_plan_workouts(synthetic_paced_plan(WorkoutPace(660)))
+        second = encode_plan_workouts(synthetic_paced_plan(WorkoutPace(660)))
+
+        self.assertEqual(first, second)
+
+    def test_too_narrow_band_fails_closed(self) -> None:
+        # At 99:59/mi a one-second buffer rounds both edges to the same speed.
+        plan = synthetic_paced_plan(WorkoutPace(5999, 5999, 1))
+
+        with self.assertRaisesRegex(FitEncodingError, "too narrow"):
+            encode_plan_workouts(plan)
 
 
 if __name__ == "__main__":
