@@ -61,6 +61,8 @@ WELCOME_STATUS = (
     "then validate the week."
 )
 
+COPY_STATUS_LABEL = "Copy message"
+
 NO_PLAN_SUMMARY = "No plan open yet."
 
 _INSTALL_SAFETY_TEXT = (
@@ -637,7 +639,9 @@ class MarathonPlannerApp(ttk.Frame):
         status_bar = ttk.Frame(self)
         status_bar.grid(row=5, column=0, sticky="ew", pady=(12, 0))
         status_bar.columnconfigure(0, weight=1)
-        ttk.Separator(status_bar).grid(row=0, column=0, sticky="ew")
+        ttk.Separator(status_bar).grid(
+            row=0, column=0, columnspan=2, sticky="ew"
+        )
         self.status = tk.StringVar(value=WELCOME_STATUS)
         status_label = ttk.Label(
             status_bar,
@@ -646,7 +650,24 @@ class MarathonPlannerApp(ttk.Frame):
             justify="left",
         )
         status_label.grid(row=1, column=0, sticky="ew", pady=(6, 10))
-        _wrap_to_container(status_bar, status_label, 8)
+        self.copy_status_button = ttk.Button(
+            status_bar,
+            text=COPY_STATUS_LABEL,
+            command=self.copy_status_message,
+        )
+        self.copy_status_button.grid(
+            row=1, column=1, sticky="ne", padx=(8, 0), pady=(6, 10)
+        )
+        # The copy button shares the row, so the message wraps to the label's
+        # own width rather than the whole status bar.
+        status_label.configure(wraplength=int(560 * _ui_scale(status_label)))
+        status_label.bind(
+            "<Configure>",
+            lambda event: status_label.configure(
+                wraplength=max(event.width - 4, 240)
+            ),
+            add="+",
+        )
 
         self.add_workout()
         self.status.set(WELCOME_STATUS)
@@ -684,6 +705,17 @@ class MarathonPlannerApp(ttk.Frame):
             title="How to use Marathon Planner",
             message=HELP_TEXT,
             parent=self,
+        )
+
+    def copy_status_message(self) -> None:
+        """Put the full status-bar message on the clipboard for sharing."""
+
+        self.clipboard_clear()
+        self.clipboard_append(self.status.get())
+        self.copy_status_button.configure(text="Copied")
+        self.copy_status_button.after(
+            1500,
+            lambda: self.copy_status_button.configure(text=COPY_STATUS_LABEL),
         )
 
     def add_workout(self) -> None:

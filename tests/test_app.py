@@ -829,6 +829,33 @@ class WeeklyEditorActionTests(unittest.TestCase):
         )
         self.assertIn("Recovered 1 MTP workout", app.status.value)
 
+    def test_copy_status_message_puts_the_full_message_on_the_clipboard(
+        self,
+    ) -> None:
+        app = self.make_app()
+        app.clipboard_clear = Mock()
+        app.clipboard_append = Mock()
+        app.copy_status_button = Mock()
+        app.status.set(
+            "MTP recovery required: an interrupted installation is safely "
+            "journaled (synthetic)."
+        )
+
+        app.copy_status_message()
+
+        app.clipboard_clear.assert_called_once_with()
+        app.clipboard_append.assert_called_once_with(
+            "MTP recovery required: an interrupted installation is safely "
+            "journaled (synthetic)."
+        )
+        app.copy_status_button.configure.assert_called_once_with(text="Copied")
+        delay, restore = app.copy_status_button.after.call_args.args
+        self.assertEqual(delay, 1500)
+        restore()
+        app.copy_status_button.configure.assert_called_with(
+            text="Copy message"
+        )
+
 
 class WorkoutColumnLayoutTests(unittest.TestCase):
     def test_heading_and_row_share_one_column_plan(self) -> None:
