@@ -54,6 +54,23 @@ _BASE_UINT32Z = 0x8C
 _MAX_FIT_STRING_BYTES = 255
 _DISPLAY_NAME_BYTES = 64
 
+# On-watch names embed the authored date with fixed English month names so
+# the bytes never depend on the computer's language settings.
+_MONTH_ABBREVIATIONS = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+)
+
 _CRC_TABLE = (
     0x0000,
     0xCC01,
@@ -179,8 +196,11 @@ def _encode_artifact(
 
     duration_type, duration_value = _fit_duration(workout.goal)
     timestamp = _fit_timestamp(workout_date)
+    # The date and terrain lead the name, so end-truncation of a long title
+    # can never drop them.
     workout_name = _fit_string(
-        f"{terrain.value}: {workout.title}", _DISPLAY_NAME_BYTES
+        f"{_display_date(workout_date)} {terrain.value}: {workout.title}",
+        _DISPLAY_NAME_BYTES,
     )
     step_name = _fit_string(f"{terrain.value}: {choice}", _DISPLAY_NAME_BYTES)
     notes = _fit_string(
@@ -333,9 +353,20 @@ def _identity_bytes(
         # refusing a same-name object whose content differs. ROAD files are
         # byte-stable and keep their original identity.
         document["activity"] = "trail_run"
+    # Embedding the authored date in the display name changed every file's
+    # bytes, so every identity must change with them: the new filenames let
+    # the installers replace an older installed file instead of refusing a
+    # same-name object whose content differs.
+    document["name_format"] = "dated"
     return json.dumps(
         document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
+
+
+def _display_date(workout_date: date) -> str:
+    """The short authored-date prefix carried in every on-watch name."""
+
+    return f"{_MONTH_ABBREVIATIONS[workout_date.month - 1]} {workout_date.day}"
 
 
 def _canonical_workout_date(value: str) -> date:
