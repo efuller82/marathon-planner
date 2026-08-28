@@ -20,6 +20,7 @@ from marathon_planner.mtp_transport import (
     validate_discovery_limit,
     validate_file_request,
     validate_identifier,
+    validate_object_name,
 )
 
 
@@ -127,8 +128,14 @@ class FakeMtpTransport:
         data: bytes | None = None,
         object_id: str | None = None,
         persistent_id: str | None | object = _AUTOMATIC_PERSISTENT_ID,
+        workout_file: bool = True,
     ) -> MtpObjectInfo:
-        """Seed one synthetic object without recording a transport call."""
+        """Seed one synthetic object without recording a transport call.
+
+        A real device also holds files the app never installs. Seeding one
+        of those takes ``workout_file=False``, which applies the object
+        name rules instead of the stricter workout upload rules.
+        """
 
         fake = self._require_device(device)
         parent = fake.objects.get(parent_object_id)
@@ -137,7 +144,10 @@ class FakeMtpTransport:
         if kind is MtpObjectKind.FILE:
             if not isinstance(data, bytes):
                 raise MtpProtocolError("Synthetic MTP files require byte content.")
-            validate_file_request(name, len(data))
+            if workout_file:
+                validate_file_request(name, len(data))
+            else:
+                validate_object_name(name)
         elif data is not None:
             raise MtpProtocolError("Synthetic MTP containers cannot have content.")
         identifier = object_id or self._new_object_id(fake)

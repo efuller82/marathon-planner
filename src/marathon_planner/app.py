@@ -40,6 +40,13 @@ from marathon_planner.mtp_install import (
 )
 from marathon_planner.mtp_state import MtpStateError, MtpStateStore
 from marathon_planner.mtp_transport import MtpError, MtpTransport
+from marathon_planner.mtp_workouts import (
+    MtpWorkoutScanError,
+    WatchWorkoutScan,
+    format_watch_scan_findings,
+    format_watch_workout_scan,
+    survey_watch_workouts,
+)
 from marathon_planner.mtp_wpd import WpdMtpTransport
 from marathon_planner.plan_import import PlanImportError, load_plan_file
 from marathon_planner.plan_export import (
@@ -183,6 +190,18 @@ def format_mtp_ui_preview(preview: MtpUiInstallPreview) -> str:
             f"Terrain: {preview.terrain}",
             "",
             format_mtp_install_preview(preview.install),
+        )
+    )
+
+
+def format_watch_report(scan: WatchWorkoutScan) -> str:
+    """Render the runner's list of watch workouts above the shareable findings."""
+
+    return "\n".join(
+        (
+            format_watch_workout_scan(scan),
+            "",
+            format_watch_scan_findings(scan),
         )
     )
 
@@ -627,6 +646,14 @@ class MarathonPlannerApp(ttk.Frame):
             state="disabled",
         )
         self.mtp_recover_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        # Seeing what the watch holds needs no plan open, so this button
+        # is usable as soon as the window appears.
+        self.mtp_survey_button = ttk.Button(
+            mtp_path,
+            text="See what's on the watch…",
+            command=self.show_watch_workouts,
+        )
+        self.mtp_survey_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
 
         self.install_caption = tk.StringVar(value=INSTALL_CAPTION_NO_PLAN)
         safety_caption = ttk.Label(
@@ -1025,6 +1052,93 @@ class MarathonPlannerApp(ttk.Frame):
         )
         if preview is not None:
             self._show_mtp_install_preview(preview)
+
+    def show_watch_workouts(self) -> None:
+        """Read what the connected watch holds and show it, changing nothing."""
+
+        scan = self.survey_watch_selection()
+        if scan is not None:
+            self._show_watch_workout_report(scan)
+
+    def survey_watch_selection(self) -> WatchWorkoutScan | None:
+        """Survey the watch through the injected transport factory.
+
+        No plan needs to be open, and nothing is written: the app opens the
+        device, lists the workouts it can read, and closes the connection.
+        """
+
+        if sys.platform != "win32":
+            self.status.set(
+                "Windows MTP unavailable: this installation path requires Windows."
+            )
+            return None
+        try:
+            transport = self._mtp_transport_factory()
+            scan = survey_watch_workouts(
+                transport,
+                FORERUNNER_265_PROVISIONAL_PROFILE,
+            )
+        except (MtpError, MtpInstallError, MtpWorkoutScanError) as error:
+            self._set_watch_survey_error(error)
+            return None
+        self.status.set(
+            f"Found {len(scan.workouts)} workout(s) on the watch; "
+            f"{scan.dated_workout_count} still show their authored date. "
+            "Nothing on the watch was changed."
+        )
+        return scan
+
+    def _set_watch_survey_error(self, error: Exception) -> None:
+        message = str(error)
+        if "unavailable" in message.lower() or "only on Windows" in message:
+            self.status.set(f"Windows MTP unavailable: {message}")
+            return
+        self.status.set(f"The watch could not be read: {message}")
+
+    def _show_watch_workout_report(self, scan: WatchWorkoutScan) -> None:
+        window = tk.Toplevel(self)
+        window.title("What is on the watch")
+        window.minsize(760, 420)
+        window.rowconfigure(0, weight=1)
+        window.columnconfigure(0, weight=1)
+        text = tk.Text(window, wrap="none", padx=12, pady=12, font=("Consolas", 10))
+        text.grid(row=0, column=0, sticky="nsew")
+        vertical = ttk.Scrollbar(window, orient="vertical", command=text.yview)
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(window, orient="horizontal", command=text.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        text.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        text.insert("1.0", format_watch_report(scan))
+        text.configure(state="disabled")
+        buttons = ttk.Frame(window)
+        buttons.grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=12)
+        buttons.columnconfigure(0, weight=1)
+        ttk.Label(
+            buttons,
+            text=(
+                "Read-only: nothing on the watch was changed. Removing workouts "
+                "is not built yet."
+            ),
+            style="Caption.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            buttons,
+            text="Copy shareable findings",
+            command=lambda: self._copy_text(format_watch_scan_findings(scan)),
+        ).grid(row=0, column=1, sticky="e")
+        ttk.Button(
+            buttons,
+            text="Copy everything",
+            command=lambda: self._copy_text(format_watch_report(scan)),
+        ).grid(row=0, column=2, sticky="e", padx=(8, 0))
+        ttk.Button(buttons, text="Close", command=window.destroy).grid(
+            row=0, column=3, sticky="e", padx=(8, 0)
+        )
+
+    def _copy_text(self, value: str) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(value)
+        self.status.set("Copied to the clipboard.")
 
     def preview_mtp_selection(
         self,

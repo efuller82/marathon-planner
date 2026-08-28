@@ -33,10 +33,15 @@ FIT_PROFILE_VERSION = 2100
 FIT_MAGIC = b".FIT"
 FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
 
-_FILE_TYPE_WORKOUT = 5
+# Shared with the bounded reader in :mod:`marathon_planner.fit_inspect`,
+# which must recognize exactly the values this encoder writes.
+FIT_FILE_TYPE_WORKOUT = 5
+FIT_SPORT_RUNNING = 1
+FIT_SUB_SPORT_TRAIL = 3
+FIT_GLOBAL_FILE_ID = 0
+FIT_GLOBAL_WORKOUT = 26
+
 _MANUFACTURER_DEVELOPMENT = 255
-_SPORT_RUNNING = 1
-_SUB_SPORT_TRAIL = 3
 _WORKOUT_TARGET_SPEED = 0
 _WORKOUT_TARGET_OPEN = 2
 _INTENSITY_ACTIVE = 0
@@ -56,7 +61,7 @@ _DISPLAY_NAME_BYTES = 64
 
 # On-watch names embed the authored date with fixed English month names so
 # the bytes never depend on the computer's language settings.
-_MONTH_ABBREVIATIONS = (
+FIT_MONTH_ABBREVIATIONS = (
     "Jan",
     "Feb",
     "Mar",
@@ -223,9 +228,9 @@ def _encode_artifact(
     messages = (
         _message(
             local_number=0,
-            global_number=0,
+            global_number=FIT_GLOBAL_FILE_ID,
             fields=(
-                _enum_field(0, _FILE_TYPE_WORKOUT),
+                _enum_field(0, FIT_FILE_TYPE_WORKOUT),
                 _uint16_field(1, _MANUFACTURER_DEVELOPMENT),
                 _uint16_field(2, 0),
                 _uint32z_field(3, serial_number),
@@ -235,16 +240,16 @@ def _encode_artifact(
         ),
         _message(
             local_number=1,
-            global_number=26,
+            global_number=FIT_GLOBAL_WORKOUT,
             fields=(
-                _enum_field(4, _SPORT_RUNNING),
+                _enum_field(4, FIT_SPORT_RUNNING),
                 _uint16_field(6, 1),
                 _string_field(8, workout_name),
                 # TRAIL files declare the watch's trail-run activity so the
                 # watch can offer them as trail workouts; ROAD files stay
                 # byte-identical to earlier releases.
                 *(
-                    (_enum_field(11, _SUB_SPORT_TRAIL),)
+                    (_enum_field(11, FIT_SUB_SPORT_TRAIL),)
                     if terrain is Terrain.TRAIL
                     else ()
                 ),
@@ -366,7 +371,7 @@ def _identity_bytes(
 def _display_date(workout_date: date) -> str:
     """The short authored-date prefix carried in every on-watch name."""
 
-    return f"{_MONTH_ABBREVIATIONS[workout_date.month - 1]} {workout_date.day}"
+    return f"{FIT_MONTH_ABBREVIATIONS[workout_date.month - 1]} {workout_date.day}"
 
 
 def _canonical_workout_date(value: str) -> date:
@@ -446,9 +451,9 @@ def _fit_file(data_records: bytes) -> bytes:
         len(data_records),
         FIT_MAGIC,
     )
-    header = header_without_crc + struct.pack("<H", _crc(header_without_crc))
+    header = header_without_crc + struct.pack("<H", fit_crc(header_without_crc))
     content = header + data_records
-    return content + struct.pack("<H", _crc(content))
+    return content + struct.pack("<H", fit_crc(content))
 
 
 def _message(
@@ -485,7 +490,9 @@ def _string_field(number: int, value: bytes) -> _FitField:
     return _FitField(number, _BASE_STRING, value)
 
 
-def _crc(data: bytes, initial: int = 0) -> int:
+def fit_crc(data: bytes, initial: int = 0) -> int:
+    """The FIT one-byte CRC-16 used by both writing and reading."""
+
     crc = initial
     for byte in data:
         temporary = _CRC_TABLE[crc & 0xF]

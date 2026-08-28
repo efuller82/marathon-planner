@@ -52,6 +52,10 @@ from marathon_planner.mtp_install import (  # noqa: E402
     MtpInstallResult,
 )
 from marathon_planner.mtp_transport import MtpError  # noqa: E402
+from marathon_planner.mtp_workouts import (  # noqa: E402
+    MtpWorkoutScanError,
+    WatchWorkoutScan,
+)
 from marathon_planner.plan_import import PlanImportError  # noqa: E402
 from marathon_planner.usb_install import UsbInstallError  # noqa: E402
 
@@ -454,6 +458,68 @@ class WeeklyEditorActionTests(unittest.TestCase):
             app.status.value,
             "USB installation canceled; no files changed.",
         )
+
+    def test_seeing_what_is_on_the_watch_needs_no_open_plan(self) -> None:
+        app = self.make_app()
+        scan = WatchWorkoutScan(
+            manufacturer="Synthetic Garmin",
+            model="Synthetic Forerunner 265",
+            storage_name="Internal Storage",
+            session_generation=1,
+            folders=(),
+            workouts=(),
+            reached_limit=False,
+        )
+        transport = Mock()
+        app._mtp_transport_factory.return_value = transport
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch(
+                "marathon_planner.app.survey_watch_workouts",
+                return_value=scan,
+            ) as survey,
+        ):
+            result = app.survey_watch_selection()
+
+        self.assertIs(result, scan)
+        self.assertIsNone(app.open_plan)
+        survey.assert_called_once_with(transport, unittest.mock.ANY)
+        app._mtp_state_factory.assert_not_called()
+        self.assertIn("Found 0 workout(s) on the watch", app.status.value)
+        self.assertIn("Nothing on the watch was changed", app.status.value)
+
+    def test_seeing_what_is_on_the_watch_is_unavailable_off_windows(self) -> None:
+        app = self.make_app()
+
+        with patch("marathon_planner.app.sys.platform", "linux"):
+            result = app.survey_watch_selection()
+
+        self.assertIsNone(result)
+        self.assertIn("Windows MTP unavailable", app.status.value)
+        app._mtp_transport_factory.assert_not_called()
+
+    def test_a_watch_that_cannot_be_read_is_reported_without_a_change_claim(
+        self,
+    ) -> None:
+        app = self.make_app()
+        app._mtp_transport_factory.return_value = Mock()
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch(
+                "marathon_planner.app.survey_watch_workouts",
+                side_effect=MtpWorkoutScanError(
+                    "The supported MTP device does not have the exact expected "
+                    "storage."
+                ),
+            ),
+        ):
+            result = app.survey_watch_selection()
+
+        self.assertIsNone(result)
+        self.assertIn("The watch could not be read", app.status.value)
+        self.assertNotIn("Found", app.status.value)
 
     def test_mtp_preview_requires_an_imported_dated_plan(self) -> None:
         app = self.make_app()
