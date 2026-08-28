@@ -31,62 +31,68 @@
   preview and apply an explicit week block with device-bound ownership,
   rollback, and preservation of unrelated files. Issue #11 (mass-storage
   validation) remains blocked on hardware.
-- The full gate compiles the project and runs 239 unit tests using only
+- The full gate compiles the project and runs 272 unit tests using only
   synthetic data; one Windows symbolic-link permission test skips.
 
 ## This session
 
-- **Cleared the blocker and shipped issue #17.** Archived the reviewed
-  journal from the interrupted 2026-08-25 install by renaming it in place to
-  `journal.reviewed-copies-verified-20260825.json`, after re-confirming it
-  recorded both copies as completed and verified. New installs are unblocked.
-- **The owner ran the Forerunner 265 check and it passed.** Preview listed
-  exactly two planned object changes (2 COPY, 0 REMOVE OWNED); the install
-  applied; both dated workouts appear on the watch. PR #20 merged on green
-  checks, issue #17 closed, card moved to Done.
-- **Answered the owner's question about leftover workouts.** Older workouts
-  remaining on the watch is expected, not a defect: this install removed
-  nothing, the app deletes only objects it can positively prove it installed,
-  and the watch absorbs and renames copied files on disconnect — after which
-  the app can no longer identify them. Those entries leave the local
-  ownership record as CONSUMED with no device change. Recorded on issue #17
-  and cross-referenced to issue #18, which already names this constraint.
-- **Independent confirmation the dated names shipped:** the two workouts
-  encoded 6 bytes larger than the 2026-08-25 versions — exactly the length of
-  the `"Apr 2 "` prefix. Evidence added to issue #18 to seed its read-only
-  investigation step.
-- Committed the previously uncommitted AGENTS.md owner-communication section
-  as documentation only (it already governed behavior; leaving it in the
-  working tree risked losing it). Revert this PR's AGENTS.md hunk if it was
-  meant to be discarded.
-- Committed the two synthetic acceptance fixtures
-  (`acceptance-synthetic.json`, `acceptance-paced-synthetic.json`) that were
-  sitting untracked. Rationale: the 2026-08-25 diagnosis stalled precisely
-  because the plan file used for an install could not be reproduced later.
-  Version-controlling the acceptance fixtures removes that failure mode, and
-  issue #18 needs an owner-run check against the same data. Both contain only
-  synthetic 2030 dates, names, and distances.
+- **The owner widened issue #18.** The app must let the runner see what is
+  actually on the watch and remove any of it — not only the workouts the app
+  can prove it installed. The owner confirmed: everything on the watch is
+  listed, and anything listed can be removed once ticked. Provenance now only
+  sets the starting checkbox and the warning, never the permission. Workouts
+  the app installed follow the date rule; everything else starts at KEEP with
+  a plain warning that the app did not install it. Recorded runs stay out of
+  scope in both directions — never listed, never deleted, contents never
+  read. The issue body and acceptance criteria were rewritten to match, and
+  the plan is recorded as a comment on issue #18.
+- **Started issue #18 on branch `feature/18-watch-workout-cleanup`** (from
+  current `master`, card moved to In Progress). The work is staged: the
+  read-only half first, then removal, so the owner-run check happens before
+  any deletion code exists.
+- **Built and committed the read-only half.** The app has a new "See what's
+  on the watch…" button that needs no plan open. It reads the watch and shows
+  every workout it finds, with the name the watch displays, whether the file
+  is marked road or trail, and where it sits. The window also shows a second
+  summary that carries no workout names at all, so findings can be pasted
+  into a public issue without disclosing what any workout is called.
+- **Safety of the new reading path, in concrete terms.** It never writes,
+  renames, or deletes. It does not enter the folders that hold recorded runs
+  and other health records. It opens a file only when the name ends in `.fit`
+  and the file is small enough to be a workout, then checks the file's own
+  contents; anything that turns out not to be a workout is thrown away rather
+  than kept. A damaged file is reported as unreadable and left alone.
+- **Verified in the real app, not only in tests.** The app was launched
+  against a synthetic watch holding four workouts the watch had "renamed",
+  one workout still waiting in the incoming folder, one non-workout file, and
+  a recorded-run folder. All four workouts were found and correctly named,
+  the non-workout file was ignored, and the recorded-run folder was reported
+  as not entered.
+- **Design point found while building it:** the on-watch name carries the
+  month and day but no year ("Apr 2"). Removal's "older than the incoming
+  block" rule therefore needs a year from somewhere else. Recorded on issue
+  #18 for the removal design.
 
 ## Next
 
-1. Start issue #18 (clean up the app's installed workouts from the watch,
-   keeping chosen ones). Its first acceptance criterion gates the rest: an
-   owner-run, read-only investigation of how the watch stores imported
-   workouts — whether the embedded dated name survives the watch's rename is
-   the key unknown, because that string is the only identity anchor issue #17
-   guarantees cannot be truncated away. Open a branch from current `master`,
-   move the card to In Progress, and plan before writing deletion code.
-2. Issue #23 (let recovery finish a fully-verified install from the journal
+1. **Owner action, and it gates everything else:** connect the Forerunner
+   265, run `python run.py` from branch `feature/18-watch-workout-cleanup`,
+   press "See what's on the watch…", then press "Copy shareable findings" and
+   paste the result onto issue #18. That answers the question the whole
+   feature rests on — whether workouts the watch has absorbed are still
+   visible, and whether their names still start with the authored date.
+2. After that evidence lands, build removal on the same branch: remember
+   consumed workouts instead of forgetting them, add the keep/remove list
+   with the agreed defaults, and reuse the existing delete-and-verify safety
+   pattern. Then the owner-run cleanup check, then one pull request.
+3. Issue #23 (let recovery finish a fully-verified install from the journal
    alone) is on the board for the owner to prioritize.
-3. Owner decision: align the export package README wording with the BOTH
+4. Owner decision: align the export package README wording with the BOTH
    install default (small follow-up, no issue filed).
-4. Open puzzle, answer only if the owner remembers: were any workout values
-   edited in the app before the 2026-08-25 installs? That would explain why
-   the journaled bytes from that day match no reproducible encoding of the
-   fixture. Blocking nothing; the journal is archived and the question is now
-   only historical.
 
 ## Blockers
 
 - Issue #11 requires a mass-storage Garmin device; the available Forerunner
   265 exposes only MTP.
+- Issue #18 cannot proceed past the read-only half until the owner runs the
+  watch check in "Next" item 1.
