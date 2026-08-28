@@ -39,6 +39,31 @@ against it.**
 - `python run.py` — launch the desktop application locally.
 - `python -m compileall -q src tests run.py && python -m unittest discover -s tests -v` — the full gate CI runs.
 
+## Communication with the owner
+
+- Explain progress in plain English first: what part of the product is being
+  worked on, what the user will be able to do, and what remains uncertain.
+- Do not make the owner decode implementation jargon. Avoid internal class,
+  interface, protocol, dependency, and tool names unless they affect an owner
+  decision. When a technical term is necessary, define it immediately in
+  everyday language.
+- Progress updates should answer: "What is happening?", "Why does it matter?",
+  and "Do I need to do anything?" Keep lower-level implementation detail in the
+  code, tests, GitHub issue, or a clearly labeled optional technical note.
+- State safety checks concretely. For example, say "the watch connection code
+  loads only when MTP installation is used" instead of "imports remain lazy,"
+  and say "the downloaded library is locked to one verified file" instead of
+  "the dependency is hash-pinned."
+- Never use a checklist of low-level implementation terms as the main progress
+  update. Terms such as facade, vtable, COM string, HRESULT, subprocess, and
+  typelib must be omitted or translated. For example: "I verified Microsoft's
+  Windows connection rules and am building the watch connector so it limits
+  device data, cleans up memory, deletes only a confirmed workout, and shows
+  understandable errors." Put the original technical checklist only in an
+  optional "Technical details" note when it is genuinely useful.
+- Never assume that repeated project sessions have made an unexplained term
+  familiar. Write each update so a non-programmer can understand it on its own.
+
 ## Rules
 
 - One GitHub issue and board card per feature. One branch

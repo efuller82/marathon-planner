@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "weeks": [
+    {
+      "start_date": "2030-04-01",
+      "workouts": [
+        {
+          "date": "2030-04-02",
+          "title": "Synthetic easy run",
+          "goal": {
+            "type": "distance",
+            "value": 1,
+            "unit": "mi"
+          },
+          "choices": {
+            "ROAD": "Synthetic road loop",
+            "TRAIL": "Synthetic trail loop"
+          }
+        }
+      ]
+    },
+    {
+      "start_date": "2030-04-08",
+      "workouts": [
+        {
+          "date": "2030-04-09",
+          "title": "Synthetic steady run",
+          "goal": {
+            "type": "time",
+            "value": 10,
+            "unit": "min"
+          },
+          "choices": {
+            "ROAD": "Synthetic riverside path",
+            "TRAIL": "Synthetic woodland path"
+          }
+        }
+      ]
+    }
+  ]
+}

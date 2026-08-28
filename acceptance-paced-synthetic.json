@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "pace_settings": {
+    "trail_adjustment_seconds": 90,
+    "alert_buffer_seconds": 30
+  },
+  "weeks": [
+    {
+      "start_date": "2030-04-01",
+      "workouts": [
+        {
+          "date": "2030-04-02",
+          "title": "Synthetic paced run",
+          "goal": {
+            "type": "distance",
+            "value": 1,
+            "unit": "mi"
+          },
+          "choices": {
+            "ROAD": "Synthetic road loop",
+            "TRAIL": "Synthetic trail loop"
+          },
+          "pace": {
+            "road_seconds_per_mile": 660
+          }
+        }
+      ]
+    }
+  ]
+}

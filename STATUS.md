@@ -1,6 +1,6 @@
 # Status
 
-- **Updated:** 2026-08-25 (late evening)
+- **Updated:** 2026-08-28
 
 ## Live
 
@@ -17,80 +17,76 @@
 - Road and trail pace targets are merged and watch-verified (issue #16
   closed, PR #19 merged 2026-08-25). Terrain BOTH (the default) installs the
   road and trail version of every workout side by side.
+- **Every workout's on-watch name now leads with its authored date** —
+  "Apr 2 ROAD: …" and "Apr 2 TRAIL: …" (issue #17 closed, PR #20 merged
+  2026-08-28 after the owner-run watch check passed).
 - **Verified watch behavior (Forerunner 265, owner-run 2026-08-25): the
   watch lists both installed workouts under both the Run and the Trail Run
   activities — it does not sort trail-marked files under Trail Run only.
   The core road-vs-trail requirement is met through clearly named workouts
-  carrying genuinely different pace bands.**
+  carrying genuinely different pace bands, now with the date leading each
+  name.**
 - The desktop app exports the complete open plan as one deterministic local
   ZIP with a hashed manifest. The USB and Forerunner 265 MTP installers
   preview and apply an explicit week block with device-bound ownership,
   rollback, and preservation of unrelated files. Issue #11 (mass-storage
   validation) remains blocked on hardware.
-- **Awaiting the owner-run watch check for issue #17:** dated on-watch names
-  are on PR #20 (branch `feature/17-dated-watch-names`, CI green, card In
-  Progress). The check is blocked on one owner action first — see Next.
-- The full gate compiles the project and runs 239 unit tests on this branch
-  using only synthetic data; one Windows symbolic-link permission test
-  skips.
+- The full gate compiles the project and runs 239 unit tests using only
+  synthetic data; one Windows symbolic-link permission test skips.
 
 ## This session
 
-- **Diagnosed the failed MTP recovery (read-only).** The journal from the
-  interrupted 2026-08-25 install is healthy: both copies (one road, one
-  trail file) are recorded as completed AND verified on the watch — only
-  the app's final local bookkeeping never ran (watch disconnected right
-  after the check). Recovery correctly refused because it re-encodes the
-  open plan and demands byte-for-byte equality with the journal, and the
-  journaled bytes are not reproducible today: not from the current fixture
-  through any code version or app path, and not from any pace/buffer
-  combination in the model's legal range (exhaustively searched). The
-  installed workout's text or goal content differed from today's fixture
-  file; the same content was installed consistently twice that day (the
-  journaled road file is byte-identical to the one in the ownership
-  record), and no alternate plan file exists on the machine. Full findings
-  are on issue #17.
-- Resolution chosen: the documented "safe manual review" convention —
-  archive the journal by renaming it to
-  `journal.reviewed-copies-verified-20260825.json` in
-  `%LOCALAPPDATA%\MarathonPlanner\mtp`. **The session was not permitted to
-  touch the state directory, so this rename is now the single blocking
-  owner action.**
-- Known follow-on risk, accepted: the two installed files stay unowned. On
-  this watch that is normally moot (it absorbs installed files on
-  disconnect). If the next preview says "A previously owned MTP object has
-  a different persistent identity", the watch did not absorb the re-copied
-  road file — record that on issue #17 for the next session.
-- Filed issue #23 (backlog, owner to prioritize): let recovery finish a
-  fully-verified install from the journal alone, so an encoder upgrade
-  between install and recovery can never strand a journal again.
+- **Cleared the blocker and shipped issue #17.** Archived the reviewed
+  journal from the interrupted 2026-08-25 install by renaming it in place to
+  `journal.reviewed-copies-verified-20260825.json`, after re-confirming it
+  recorded both copies as completed and verified. New installs are unblocked.
+- **The owner ran the Forerunner 265 check and it passed.** Preview listed
+  exactly two planned object changes (2 COPY, 0 REMOVE OWNED); the install
+  applied; both dated workouts appear on the watch. PR #20 merged on green
+  checks, issue #17 closed, card moved to Done.
+- **Answered the owner's question about leftover workouts.** Older workouts
+  remaining on the watch is expected, not a defect: this install removed
+  nothing, the app deletes only objects it can positively prove it installed,
+  and the watch absorbs and renames copied files on disconnect — after which
+  the app can no longer identify them. Those entries leave the local
+  ownership record as CONSUMED with no device change. Recorded on issue #17
+  and cross-referenced to issue #18, which already names this constraint.
+- **Independent confirmation the dated names shipped:** the two workouts
+  encoded 6 bytes larger than the 2026-08-25 versions — exactly the length of
+  the `"Apr 2 "` prefix. Evidence added to issue #18 to seed its read-only
+  investigation step.
+- Committed the previously uncommitted AGENTS.md owner-communication section
+  as documentation only (it already governed behavior; leaving it in the
+  working tree risked losing it). Revert this PR's AGENTS.md hunk if it was
+  meant to be discarded.
+- Committed the two synthetic acceptance fixtures
+  (`acceptance-synthetic.json`, `acceptance-paced-synthetic.json`) that were
+  sitting untracked. Rationale: the 2026-08-25 diagnosis stalled precisely
+  because the plan file used for an install could not be reproduced later.
+  Version-controlling the acceptance fixtures removes that failure mode, and
+  issue #18 needs an owner-run check against the same data. Both contain only
+  synthetic 2030 dates, names, and distances.
 
 ## Next
 
-1. Owner action (one command, then the check): rename the journal —
-   `Rename-Item "$env:LOCALAPPDATA\MarathonPlanner\mtp\journal.json" "journal.reviewed-copies-verified-20260825.json"`
-   — then run the issue #17 watch check from this branch (import
-   `acceptance-paced-synthetic.json`, terrain BOTH, week 1, preview should
-   list two dated files to copy; confirm both names start with "Apr 2";
-   record model and pass/fail on issue #17). After a PASS: merge PR #20 on
-   green checks, close issue #17, move its card to Done. On a FAIL: record
-   which step failed and diagnose read-only first.
-2. Then issue #18 (date-aware cleanup of app-installed workouts; builds on
-   the dated identities from #17). Issue #23 (recovery hardening) is on the
-   board for the owner to prioritize.
-3. Owner decision: the still-uncommitted AGENTS.md owner-communication
-   section (`git diff AGENTS.md`) — commit as documentation-only or
-   discard.
-4. Owner decision: align the export package README wording with the BOTH
-   install default (small follow-up).
-5. Open puzzle, answer only if the owner remembers: were any workout
-   values (title, choices, goal, paces) edited in the app before the
-   2026-08-25 installs? That would explain why the journaled bytes differ
-   from the fixture file. Not blocking anything.
+1. Start issue #18 (clean up the app's installed workouts from the watch,
+   keeping chosen ones). Its first acceptance criterion gates the rest: an
+   owner-run, read-only investigation of how the watch stores imported
+   workouts — whether the embedded dated name survives the watch's rename is
+   the key unknown, because that string is the only identity anchor issue #17
+   guarantees cannot be truncated away. Open a branch from current `master`,
+   move the card to In Progress, and plan before writing deletion code.
+2. Issue #23 (let recovery finish a fully-verified install from the journal
+   alone) is on the board for the owner to prioritize.
+3. Owner decision: align the export package README wording with the BOTH
+   install default (small follow-up, no issue filed).
+4. Open puzzle, answer only if the owner remembers: were any workout values
+   edited in the app before the 2026-08-25 installs? That would explain why
+   the journaled bytes from that day match no reproducible encoding of the
+   fixture. Blocking nothing; the journal is archived and the question is now
+   only historical.
 
 ## Blockers
 
-- Issue #17's watch check is blocked until the owner archives the reviewed
-  journal (Next, step 1).
 - Issue #11 requires a mass-storage Garmin device; the available Forerunner
   265 exposes only MTP.
