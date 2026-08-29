@@ -1068,6 +1068,7 @@ class WeeklyEditorActionTests(unittest.TestCase):
         )
 
         with (
+            patch("marathon_planner.app.sys.platform", "win32"),
             patch.object(
                 app,
                 "_prepare_mtp_selection",
