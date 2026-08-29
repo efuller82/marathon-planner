@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from marathon_planner.mtp_fake import FakeMtpTransport  # noqa: E402
 from marathon_planner.mtp_install import (  # noqa: E402
     MtpCompatibilityProfile,
     MtpDesiredObject,
+    MtpInstallAction,
     MtpInstallError,
     apply_mtp_install,
     preview_mtp_install,
@@ -25,6 +27,8 @@ from marathon_planner.mtp_install import (  # noqa: E402
 )
 from marathon_planner.mtp_state import (  # noqa: E402
     MtpDeviceOwnership,
+    MtpJournalAction,
+    MtpJournalKind,
     MtpJournalPhase,
     MtpOwnedObject,
     MtpOwnershipCatalog,
@@ -793,6 +797,300 @@ class MtpLocalCheckpointFaultMatrixTests(unittest.TestCase):
                     PROFILE,
                     state_store=scenario.store,
                     desired=scenario.desired,
+                )
+
+
+class MtpJournalOnlyRecoveryTests(unittest.TestCase):
+    """A journal whose copies all landed finishes without the original bytes."""
+
+    def _interrupt_after_copies(self, scenario) -> None:
+        """Stop one install once every copy is verified but before ownership."""
+
+        scenario.store.arm("write_ownership.before")
+        with self.assertRaises(MtpInstallError):
+            apply_mtp_install(
+                scenario.preview,
+                state_store=scenario.store,
+                confirmed=True,
+            )
+        journal = scenario.store.read_journal()
+        self.assertIsNotNone(journal)
+        self.assertTrue(
+            all(
+                operation.completed
+                for operation in journal.operations
+                if operation.action is MtpJournalAction.COPY
+            )
+        )
+        scenario.transport.set_connected(scenario.device, False)
+        scenario.transport.set_connected(scenario.device, True)
+        scenario.transport.call_log.clear()
+
+    def test_fully_copied_journal_finishes_with_no_workout_bytes_supplied(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary:
+            scenario = _scenario(Path(temporary) / "state", old_count=1)
+            self._interrupt_after_copies(scenario)
+            self.assertIs(
+                scenario.store.read_journal().phase,
+                MtpJournalPhase.COPIES_VERIFIED,
+            )
+            # Something the app never installed, sharing the destination.
+            scenario.transport.add_object(
+                scenario.device,
+                parent_object_id=scenario.destination.object_id,
+                name="unrelated.fit",
+                kind=MtpObjectKind.FILE,
+                data=b"not ours",
+                persistent_id="persistent-unrelated",
+            )
+
+            result = recover_mtp_install(
+                scenario.transport,
+                PROFILE,
+                state_store=scenario.store,
+            )
+
+            self.assertTrue(result.recovered)
+            self.assertEqual(result.workout_count, 1)
+            self.assertEqual(result.copied_count, 1)
+            self.assertEqual(result.removed_count, 1)
+            self.assertIsNone(scenario.store.read_journal())
+            self.assertEqual(
+                _destination_names(scenario),
+                {scenario.desired[0].filename, "unrelated.fit"},
+            )
+            device = scenario.store.read_ownership().devices[0]
+            self.assertEqual(
+                tuple(record.filename for record in device.objects),
+                (scenario.desired[0].filename,),
+            )
+            self.assertEqual(device.consumed, ())
+            self.assertFalse(
+                any(
+                    call.startswith(("create.", "write.", "commit."))
+                    for call in scenario.transport.call_log
+                )
+            )
+            self.assertEqual(
+                sum(call == "delete.after" for call in scenario.transport.call_log),
+                1,
+            )
+
+    def test_journal_stamped_before_the_verified_write_still_finishes_alone(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary:
+            scenario = _scenario(Path(temporary) / "state")
+            scenario.store.arm("write_journal.after")
+
+            with self.assertRaises(MtpInstallError):
+                apply_mtp_install(
+                    scenario.preview,
+                    state_store=scenario.store,
+                    confirmed=True,
+                )
+
+            journal = scenario.store.read_journal()
+            self.assertIs(journal.phase, MtpJournalPhase.PREPARED)
+            self.assertTrue(journal.operations[0].completed)
+            scenario.transport.set_connected(scenario.device, False)
+            scenario.transport.set_connected(scenario.device, True)
+
+            result = recover_mtp_install(
+                scenario.transport,
+                PROFILE,
+                state_store=scenario.store,
+            )
+
+            self.assertTrue(result.recovered)
+            self.assertIsNone(scenario.store.read_journal())
+            device = scenario.store.read_ownership().devices[0]
+            self.assertEqual(
+                tuple(record.filename for record in device.objects),
+                (scenario.desired[0].filename,),
+            )
+
+    def test_changed_workout_bytes_refuse_but_the_journal_alone_finishes(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary:
+            scenario = _scenario(Path(temporary) / "state")
+            self._interrupt_after_copies(scenario)
+            reformatted = (
+                MtpDesiredObject(
+                    scenario.desired[0].filename,
+                    b"a later release encodes this workout differently",
+                ),
+            )
+
+            with self.assertRaisesRegex(MtpInstallError, "do not match"):
+                recover_mtp_install(
+                    scenario.transport,
+                    PROFILE,
+                    state_store=scenario.store,
+                    desired=reformatted,
+                )
+
+            result = recover_mtp_install(
+                scenario.transport,
+                PROFILE,
+                state_store=scenario.store,
+            )
+
+            self.assertTrue(result.recovered)
+            self.assertIsNone(scenario.store.read_journal())
+
+    def test_an_unfinished_copy_still_demands_the_exact_workout_bytes(self) -> None:
+        with TemporaryDirectory() as temporary:
+            scenario = _scenario(Path(temporary) / "state", desired_count=2)
+            scenario.transport.inject_fault("create.before", after_calls=1)
+
+            with self.assertRaises(MtpInstallError):
+                apply_mtp_install(
+                    scenario.preview,
+                    state_store=scenario.store,
+                    confirmed=True,
+                )
+
+            journal = scenario.store.read_journal()
+            self.assertFalse(journal.operations[1].completed)
+            scenario.transport.set_connected(scenario.device, False)
+            scenario.transport.set_connected(scenario.device, True)
+            scenario.transport.call_log.clear()
+
+            with self.assertRaisesRegex(
+                MtpInstallError,
+                "cannot be finished from its record alone",
+            ):
+                recover_mtp_install(
+                    scenario.transport,
+                    PROFILE,
+                    state_store=scenario.store,
+                )
+
+            self.assertEqual(scenario.store.read_journal(), journal)
+            self.assertEqual(scenario.transport.call_log, [])
+
+            with self.assertRaisesRegex(MtpInstallError, "do not match"):
+                recover_mtp_install(
+                    scenario.transport,
+                    PROFILE,
+                    state_store=scenario.store,
+                    desired=(
+                        MtpDesiredObject(
+                            scenario.desired[0].filename,
+                            b"different bytes entirely",
+                        ),
+                        scenario.desired[1],
+                    ),
+                )
+
+            self.assertEqual(scenario.store.read_journal(), journal)
+
+    def test_a_copy_the_watch_absorbed_is_remembered_not_claimed(self) -> None:
+        with TemporaryDirectory() as temporary:
+            scenario = _scenario(Path(temporary) / "state")
+            self._interrupt_after_copies(scenario)
+            copied = scenario.store.read_journal().operations[0]
+            fake = scenario.transport._require_device(scenario.device)
+            absorbed = next(
+                object_id
+                for object_id, item in fake.objects.items()
+                if item.persistent_id == copied.object_persistent_id
+            )
+            del fake.objects[absorbed]
+
+            result = recover_mtp_install(
+                scenario.transport,
+                PROFILE,
+                state_store=scenario.store,
+            )
+
+            self.assertTrue(result.recovered)
+            self.assertIsNone(scenario.store.read_journal())
+            device = scenario.store.read_ownership().devices[0]
+            self.assertEqual(device.objects, ())
+            self.assertEqual(
+                tuple(item.installed_filename for item in device.consumed),
+                (scenario.desired[0].filename,),
+            )
+            self.assertEqual(device.consumed[0].sha256, copied.sha256)
+            self.assertEqual(device.consumed[0].authored_date, "2030-05-01")
+
+    def test_ownership_the_journal_never_touched_survives_recovery(self) -> None:
+        with TemporaryDirectory() as temporary:
+            scenario = _scenario(Path(temporary) / "state", old_count=2)
+            kept, dropped = scenario.old_records
+            store = scenario.store
+            preview = preview_mtp_install(
+                scenario.transport,
+                PROFILE,
+                planning_state=MtpPlanningState(scenario.ownership, SALT, True),
+                desired=(
+                    MtpDesiredObject(kept.filename, b"old synthetic FIT 1"),
+                    scenario.desired[0],
+                ),
+            )
+            # The kept workout is already on the device, so the journal only
+            # ever names the new copy and the dropped removal.
+            self.assertEqual(
+                sorted(
+                    (change.action, change.filename)
+                    for change in preview.changes
+                ),
+                sorted(
+                    (
+                        (MtpInstallAction.COPY, scenario.desired[0].filename),
+                        (MtpInstallAction.REMOVE_OWNED, dropped.filename),
+                    )
+                ),
+            )
+            store.arm("write_ownership.before")
+            with self.assertRaises(MtpInstallError):
+                apply_mtp_install(preview, state_store=store, confirmed=True)
+            scenario.transport.set_connected(scenario.device, False)
+            scenario.transport.set_connected(scenario.device, True)
+
+            result = recover_mtp_install(
+                scenario.transport,
+                PROFILE,
+                state_store=store,
+            )
+
+            self.assertTrue(result.recovered)
+            self.assertEqual(result.removed_count, 1)
+            device = store.read_ownership().devices[0]
+            self.assertEqual(
+                sorted(record.filename for record in device.objects),
+                sorted((kept.filename, scenario.desired[0].filename)),
+            )
+            self.assertEqual(
+                _destination_names(scenario),
+                {kept.filename, scenario.desired[0].filename},
+            )
+            self.assertNotIn(
+                dropped.filename,
+                {record.filename for record in device.objects},
+            )
+
+    def test_an_interrupted_cleanup_is_never_finished_as_an_installation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary:
+            scenario = _scenario(Path(temporary) / "state", old_count=1)
+            self._interrupt_after_copies(scenario)
+            journal = scenario.store.read_journal()
+            scenario.store.write_journal(
+                replace(journal, kind=MtpJournalKind.CLEANUP)
+            )
+
+            with self.assertRaisesRegex(MtpInstallError, "workout cleanup"):
+                recover_mtp_install(
+                    scenario.transport,
+                    PROFILE,
+                    state_store=scenario.store,
                 )
 
 

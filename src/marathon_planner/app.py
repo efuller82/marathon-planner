@@ -35,6 +35,7 @@ from marathon_planner.mtp_install import (
     apply_mtp_install,
     build_mtp_desired_objects,
     format_mtp_install_preview,
+    journal_recovers_without_workout_bytes,
     preview_mtp_install as build_mtp_install_preview,
     recover_mtp_install,
 )
@@ -139,7 +140,10 @@ first, and nothing is written until you confirm that exact preview.
 7. A Forerunner 265 does not appear as a USB drive. On Windows, use \
 "Preview connected Forerunner 265" in the same section with the same \
 weeks and terrain. If an installation is interrupted, reconnect the same \
-watch and choose "Recover interrupted installation" to finish it safely.
+watch and choose "Recover interrupted installation" to finish it safely. \
+If every workout file had already reached the watch, that finishes on its \
+own with no plan open; if files were still being copied, open the same \
+plan on the same weeks and terrain first, and the app will tell you so.
 
 8. Your watch keeps every workout you send it until something removes \
 them. "Manage watch workouts" lists everything in the watch's workout \
@@ -227,6 +231,26 @@ def format_watch_report(scan: WatchWorkoutScan) -> str:
             "",
             format_watch_scan_findings(scan),
         )
+    )
+
+
+def _mtp_recovery_instruction(journal: object) -> str:
+    """Say what the runner needs ready before an interrupted install can finish.
+
+    Once every workout file has reached the watch there is nothing left to
+    write, so the plan no longer has to be open. Until then, recovery still
+    needs the same plan on the same week block and terrain.
+    """
+
+    if journal_recovers_without_workout_bytes(journal):
+        return (
+            "Every workout file already reached the device, so reconnect the "
+            "same device and choose Recover interrupted installation. No plan "
+            "needs to be open."
+        )
+    return (
+        "Reconnect the same device, select the same week block and terrain, "
+        "then choose Recover interrupted installation."
     )
 
 
@@ -686,11 +710,13 @@ class MarathonPlannerApp(ttk.Frame):
             state="disabled",
         )
         self.mtp_preview_button.grid(row=0, column=1, sticky="w", padx=(6, 0))
+        # An interrupted installation that already copied every workout file
+        # finishes from its own record, so this stays usable with no plan
+        # open. One that still has files to copy says so when it is pressed.
         self.mtp_recover_button = ttk.Button(
             mtp_path,
             text="Recover interrupted installation…",
             command=self.recover_mtp_selection,
-            state="disabled",
         )
         self.mtp_recover_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
         # Neither of these needs a plan open, so both are usable as soon as
@@ -900,7 +926,6 @@ class MarathonPlannerApp(ttk.Frame):
         self.export_button.state(["!disabled"])
         self.usb_preview_button.state(["!disabled"])
         self.mtp_preview_button.state(["!disabled"])
-        self.mtp_recover_button.state(["!disabled"])
         self.install_caption.set(INSTALL_CAPTION_READY)
         self._update_week_navigation()
 
@@ -1273,8 +1298,7 @@ class MarathonPlannerApp(ttk.Frame):
             return
         self.status.set(
             "MTP recovery required: an interrupted installation is safely "
-            "journaled. Reconnect the same device, select the same week block "
-            "and terrain, then choose Recover interrupted installation."
+            f"journaled. {_mtp_recovery_instruction(journal)}"
         )
 
     def _show_watch_cleanup(self, preview: MtpCleanupPreview) -> None:
@@ -1473,11 +1497,11 @@ class MarathonPlannerApp(ttk.Frame):
         parsed_start_week, parsed_week_count, desired = selection
         try:
             state_store = self._mtp_state_factory()
-            if state_store.read_journal() is not None:
+            pending = state_store.read_journal()
+            if pending is not None:
                 self.status.set(
-                    "MTP recovery required: an interrupted installation is safely "
-                    "journaled. Reconnect the same device, select the same week "
-                    "block and terrain, then choose Recover interrupted installation."
+                    "MTP recovery required: an interrupted installation is "
+                    f"safely journaled. {_mtp_recovery_instruction(pending)}"
                 )
                 return None
             transport = self._mtp_transport_factory()
@@ -1657,24 +1681,48 @@ class MarathonPlannerApp(ttk.Frame):
         return True
 
     def recover_mtp_selection(self) -> bool:
-        """Continue one durable MTP journal using the current exact selection."""
+        """Continue one durable MTP journal, asking for the plan only if needed.
 
-        selection = self._prepare_mtp_selection(
-            "recovered",
-            start_week=self.usb_start_week.get(),
-            week_count=self.usb_week_count.get(),
-            terrain=self.usb_terrain.get(),
-        )
-        if selection is None:
+        An installation whose workout files all reached the watch before the
+        interruption has nothing left to write, so it finishes from its own
+        record with no plan open. One that still has files to copy needs the
+        same plan, week block, and terrain as before.
+        """
+
+        if sys.platform != "win32":
+            self.status.set(
+                "Windows MTP unavailable: this installation path requires Windows."
+            )
             return False
-        _start_week, _week_count, desired = selection
         try:
             state_store = self._mtp_state_factory()
-            if state_store.read_journal() is None:
-                self.status.set(
-                    "MTP recovery not needed: there is no interrupted installation."
-                )
+            journal = state_store.read_journal()
+        except (MtpError, MtpInstallError, MtpStateError) as error:
+            self._set_mtp_recovery_error(error)
+            return False
+        if journal is None:
+            self.status.set(
+                "MTP recovery not needed: there is no interrupted installation."
+            )
+            return False
+        desired: tuple[MtpDesiredObject, ...] | None = None
+        # A cleanup journal is refused by name below, so it never has to ask
+        # the runner for a plan it will not use.
+        needs_workout_bytes = (
+            journal.kind is MtpJournalKind.INSTALL
+            and not journal_recovers_without_workout_bytes(journal)
+        )
+        if needs_workout_bytes:
+            selection = self._prepare_mtp_selection(
+                "recovered",
+                start_week=self.usb_start_week.get(),
+                week_count=self.usb_week_count.get(),
+                terrain=self.usb_terrain.get(),
+            )
+            if selection is None:
                 return False
+            _start_week, _week_count, desired = selection
+        try:
             result = recover_mtp_install(
                 self._mtp_transport_factory(),
                 FORERUNNER_265_PROVISIONAL_PROFILE,
@@ -1682,13 +1730,16 @@ class MarathonPlannerApp(ttk.Frame):
                 desired=desired,
             )
         except (MtpError, MtpInstallError, MtpStateError) as error:
-            self.status.set(
-                "MTP recovery did not finish; the journal remains for safe manual "
-                f"review or another recovery attempt. {error}"
-            )
+            self._set_mtp_recovery_error(error)
             return False
         self._set_mtp_success(result)
         return True
+
+    def _set_mtp_recovery_error(self, error: Exception) -> None:
+        self.status.set(
+            "MTP recovery did not finish; the journal remains for safe manual "
+            f"review or another recovery attempt. {error}"
+        )
 
     def _prepare_mtp_selection(
         self,
@@ -1745,18 +1796,18 @@ class MarathonPlannerApp(ttk.Frame):
         error: Exception,
     ) -> None:
         try:
-            recovery_required = state_store.read_journal() is not None
+            journal = state_store.read_journal()
         except MtpStateError:
             self.status.set(
                 "MTP installation was not completed; local recovery state requires "
                 "manual review. No automatic retry was attempted."
             )
             return
-        if recovery_required:
+        if journal is not None:
             self.status.set(
-                "MTP installation was not completed; recovery is required and no "
-                "automatic retry was attempted. Reconnect the same device, keep "
-                f"the same week block and terrain, then choose recovery. {error}"
+                "MTP installation was not completed; recovery is required and "
+                "no automatic retry was attempted. "
+                f"{_mtp_recovery_instruction(journal)} {error}"
             )
             return
         self.status.set(f"MTP install not applied: {error}")

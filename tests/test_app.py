@@ -1,6 +1,7 @@
 """Headless tests for weekly editor actions."""
 
 from datetime import date
+from hashlib import sha256
 from pathlib import Path
 import sys
 from types import ModuleType
@@ -56,7 +57,13 @@ from marathon_planner.mtp_cleanup import (  # noqa: E402
     MtpCleanupError,
     MtpCleanupPreview,
 )
-from marathon_planner.mtp_state import MtpJournalKind  # noqa: E402
+from marathon_planner.mtp_state import (  # noqa: E402
+    MtpJournal,
+    MtpJournalAction,
+    MtpJournalKind,
+    MtpJournalOperation,
+    MtpJournalPhase,
+)
 from marathon_planner.mtp_workouts import (  # noqa: E402
     MtpWorkoutScanError,
     WatchWorkoutScan,
@@ -1052,7 +1059,7 @@ class WeeklyEditorActionTests(unittest.TestCase):
         app = self.make_app()
         desired = (MtpDesiredObject("20300402-mp.fit", b"fit"),)
         state_store = Mock()
-        state_store.read_journal.return_value = Mock()
+        state_store.read_journal.return_value = Mock(kind=MtpJournalKind.INSTALL)
         transport = Mock()
         app._mtp_state_factory.return_value = state_store
         app._mtp_transport_factory.return_value = transport
@@ -1080,6 +1087,110 @@ class WeeklyEditorActionTests(unittest.TestCase):
             desired=desired,
         )
         self.assertIn("Recovered 1 MTP workout", app.status.value)
+
+    @staticmethod
+    def install_journal(*, copy_completed: bool) -> MtpJournal:
+        """One interrupted install whose single copy did or did not land."""
+
+        return MtpJournal(
+            transaction_id="synthetic-transaction",
+            phase=(
+                MtpJournalPhase.COPIES_VERIFIED
+                if copy_completed
+                else MtpJournalPhase.PREPARED
+            ),
+            device_binding="b" * 64,
+            profile_id="garmin-forerunner-265-provisional-v1",
+            session_generation=1,
+            destination_persistent_id="persistent-newfiles",
+            operations=(
+                MtpJournalOperation(
+                    action=MtpJournalAction.COPY,
+                    filename="20300402-mp.fit",
+                    size=3,
+                    sha256=sha256(b"fit").hexdigest(),
+                    destination_persistent_id="persistent-newfiles",
+                    object_persistent_id=(
+                        "persistent-copy" if copy_completed else None
+                    ),
+                    object_id="object-copy" if copy_completed else None,
+                    completed=copy_completed,
+                ),
+            ),
+        )
+
+    def test_a_fully_copied_journal_recovers_with_no_plan_open(self) -> None:
+        app = self.make_app()
+        state_store = Mock()
+        state_store.read_journal.return_value = self.install_journal(
+            copy_completed=True
+        )
+        transport = Mock()
+        app._mtp_state_factory.return_value = state_store
+        app._mtp_transport_factory.return_value = transport
+        result = MtpInstallResult(
+            "Garmin", "Forerunner 265", 1, 1, 0, recovered=True
+        )
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch.object(app, "_prepare_mtp_selection") as prepare,
+            patch(
+                "marathon_planner.app.recover_mtp_install", return_value=result
+            ) as recover,
+        ):
+            recovered = app.recover_mtp_selection()
+
+        self.assertTrue(recovered)
+        self.assertIsNone(app.open_plan)
+        prepare.assert_not_called()
+        recover.assert_called_once_with(
+            transport,
+            unittest.mock.ANY,
+            state_store=state_store,
+            desired=None,
+        )
+        self.assertIn("Recovered 1 MTP workout", app.status.value)
+
+    def test_an_unfinished_copy_still_asks_for_the_plan_before_recovering(
+        self,
+    ) -> None:
+        app = self.make_app()
+        state_store = Mock()
+        state_store.read_journal.return_value = self.install_journal(
+            copy_completed=False
+        )
+        app._mtp_state_factory.return_value = state_store
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch("marathon_planner.app.recover_mtp_install") as recover,
+        ):
+            recovered = app.recover_mtp_selection()
+
+        self.assertFalse(recovered)
+        recover.assert_not_called()
+        self.assertIn("import a dated JSON plan first", app.status.value)
+
+    def test_a_fully_copied_journal_says_no_plan_needs_to_be_open(self) -> None:
+        app = self.make_app()
+        state_store = Mock()
+        state_store.read_journal.return_value = self.install_journal(
+            copy_completed=True
+        )
+        app._mtp_state_factory.return_value = state_store
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch("marathon_planner.app.preview_watch_cleanup") as build,
+        ):
+            result = app.watch_cleanup_selection()
+
+        self.assertIsNone(result)
+        build.assert_not_called()
+        self.assertIn("MTP recovery required", app.status.value)
+        self.assertIn("No plan needs to be open", app.status.value)
+        self.assertNotIn("week block", app.status.value)
 
     def test_copy_status_message_puts_the_full_message_on_the_clipboard(
         self,
