@@ -38,7 +38,7 @@ from marathon_planner.mtp_transport import (
 
 
 MAX_SCAN_DEPTH = 4
-MAX_SCAN_FOLDERS = 128
+MAX_SCAN_FOLDERS = 256
 MAX_SCAN_FILES = 4_000
 
 # Recorded runs and the watch's other health records live under these names.
@@ -103,6 +103,7 @@ class WatchFolderSurvey:
     too_large_count: int
     unreadable_count: int
     other_file_count: int
+    not_opened_count: int = 0
     skip_reason: str | None = None
 
 
@@ -153,7 +154,7 @@ def scan_watch_workouts(
     folders: list[WatchFolderSurvey] = []
     workouts: list[WatchWorkout] = []
     budget = _ScanBudget()
-    _walk(session, storage, (storage.name,), 0, folders, workouts, budget)
+    _walk(session, profile, storage, (storage.name,), 0, folders, workouts, budget)
     return WatchWorkoutScan(
         manufacturer=session.device.manufacturer,
         model=session.device.model,
@@ -163,6 +164,116 @@ def scan_watch_workouts(
         workouts=tuple(workouts),
         reached_limit=budget.reached_limit,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class WatchWorkoutFolder:
+    """One folder that holds workouts, and what was found inside it."""
+
+    path: tuple[str, ...]
+    info: MtpObjectInfo = field(repr=False)
+    workouts: tuple[WatchWorkout, ...]
+
+
+def scan_workout_folders(
+    session: MtpSession,
+    profile: MtpCompatibilityProfile,
+) -> tuple[WatchWorkoutFolder, ...]:
+    """Read only the folders that hold workouts, for planning a cleanup.
+
+    The full survey exists to answer where workouts live. Cleanup already
+    knows, so it reads those folders alone: less of the device is touched and
+    the listing can be repeated cheaply to revalidate before anything is
+    deleted. A folder the device does not have is skipped, not an error.
+    """
+
+    if not isinstance(profile, MtpCompatibilityProfile):
+        raise MtpWorkoutScanError("The MTP compatibility profile is invalid.")
+    storage = _storage(session, profile)
+    folders: list[WatchWorkoutFolder] = []
+    seen: set[str] = set()
+    budget = _ScanBudget()
+    for path in profile.workout_paths:
+        container = _resolve_folder(session, storage, path)
+        if container is None:
+            continue
+        _collect_workout_folder(
+            session,
+            container,
+            (storage.name, *path),
+            0,
+            folders,
+            seen,
+            budget,
+        )
+    return tuple(folders)
+
+
+def _resolve_folder(
+    session: MtpSession,
+    storage: MtpObjectInfo,
+    path: tuple[str, ...],
+) -> MtpObjectInfo | None:
+    current = storage
+    for name in path:
+        matches = tuple(
+            item
+            for item in _children(session, current.object_id)
+            if item.name.casefold() == name.casefold()
+        )
+        if not matches:
+            return None
+        if len(matches) != 1 or matches[0].kind is MtpObjectKind.FILE:
+            raise MtpWorkoutScanError(
+                f"The device's {name} folder is not the single folder expected."
+            )
+        current = matches[0]
+    return current
+
+
+def _collect_workout_folder(
+    session: MtpSession,
+    container: MtpObjectInfo,
+    path: tuple[str, ...],
+    depth: int,
+    folders: list[WatchWorkoutFolder],
+    seen: set[str],
+    budget: _ScanBudget,
+) -> None:
+    if container.object_id in seen:
+        return
+    seen.add(container.object_id)
+    children = _children(session, container.object_id)
+    workouts: list[WatchWorkout] = []
+    for item in children:
+        if item.kind is not MtpObjectKind.FILE:
+            continue
+        if not budget.take_file():
+            raise MtpWorkoutScanError(
+                "The device holds more workout files than a cleanup can list."
+            )
+        outcome = _inspect_file(session, item, path)
+        if isinstance(outcome, WatchWorkout):
+            workouts.append(outcome)
+    folders.append(WatchWorkoutFolder(path, container, tuple(workouts)))
+    for item in children:
+        if item.kind is MtpObjectKind.FILE:
+            continue
+        if item.name.casefold() in NEVER_ENTERED_FOLDER_NAMES:
+            continue
+        if depth + 1 > MAX_SCAN_DEPTH or not budget.take_folder():
+            raise MtpWorkoutScanError(
+                "The device's workout storage is deeper than a cleanup can list."
+            )
+        _collect_workout_folder(
+            session,
+            item,
+            (*path, item.name),
+            depth + 1,
+            folders,
+            seen,
+            budget,
+        )
 
 
 @dataclass(slots=True)
@@ -203,6 +314,7 @@ def _storage(
 
 def _walk(
     session: MtpSession,
+    profile: MtpCompatibilityProfile,
     container: MtpObjectInfo,
     path: tuple[str, ...],
     depth: int,
@@ -213,11 +325,18 @@ def _walk(
     children = _children(session, container.object_id)
     files = tuple(item for item in children if item.kind is MtpObjectKind.FILE)
     subfolders = tuple(item for item in children if item.kind is not MtpObjectKind.FILE)
+    # Everything outside the folders that hold workouts is counted but
+    # never opened, so unrelated device files are not read at all.
+    readable = profile.holds_workouts(path[1:])
     found = 0
     too_large = 0
     unreadable = 0
     other = 0
+    not_opened = 0
     for item in files:
+        if not readable:
+            not_opened += 1
+            continue
         if not budget.take_file():
             break
         outcome = _inspect_file(session, item, path)
@@ -240,6 +359,7 @@ def _walk(
             too_large_count=too_large,
             unreadable_count=unreadable,
             other_file_count=other,
+            not_opened_count=not_opened,
         )
     )
     for item in subfolders:
@@ -253,7 +373,16 @@ def _walk(
         if not budget.take_folder():
             folders.append(_not_entered(child_path, "survey limit reached"))
             continue
-        _walk(session, item, child_path, depth + 1, folders, workouts, budget)
+        _walk(
+            session,
+            profile,
+            item,
+            child_path,
+            depth + 1,
+            folders,
+            workouts,
+            budget,
+        )
 
 
 def _not_entered(path: tuple[str, ...], reason: str) -> WatchFolderSurvey:
@@ -305,6 +434,32 @@ def _inspect_file(
         terrain=identity.terrain,
         authored_date=dated_name_prefix(name) if name is not None else None,
     )
+
+
+def list_folder_files(
+    session: MtpSession,
+    folder: MtpObjectInfo,
+) -> tuple[MtpObjectInfo, ...]:
+    """List the files directly inside one folder, skipping its subfolders.
+
+    A watch's workout storage holds subfolders, so unlike the install
+    destination this refuses nothing for containing one. Every file must
+    still carry a usable identity of its own.
+    """
+
+    files = tuple(
+        item
+        for item in _children(session, folder.object_id)
+        if item.kind is MtpObjectKind.FILE
+    )
+    if any(item.persistent_id is None for item in files):
+        raise MtpWorkoutScanError("A workout file on the device has no identity.")
+    persistent_ids = [item.persistent_id for item in files]
+    if len(persistent_ids) != len(set(persistent_ids)):
+        raise MtpWorkoutScanError(
+            "A workout folder on the device has duplicate file identities."
+        )
+    return files
 
 
 def _children(session: MtpSession, parent_object_id: str) -> tuple[MtpObjectInfo, ...]:
@@ -381,7 +536,8 @@ def format_watch_scan_findings(scan: WatchWorkoutScan) -> str:
             f"{folder.workout_count} workout(s), "
             f"{folder.too_large_count} too large to read, "
             f"{folder.unreadable_count} unreadable, "
-            f"{folder.other_file_count} not workouts"
+            f"{folder.other_file_count} not workouts, "
+            f"{folder.not_opened_count} not opened"
         )
     lines.extend(("", "Workout file sizes found:"))
     sizes = sorted(item.size for item in scan.workouts)
@@ -407,10 +563,13 @@ __all__ = [
     "MtpWorkoutScanError",
     "NEVER_ENTERED_FOLDER_NAMES",
     "WatchFolderSurvey",
+    "WatchWorkoutFolder",
     "WatchWorkout",
     "WatchWorkoutScan",
     "format_watch_scan_findings",
+    "list_folder_files",
     "format_watch_workout_scan",
     "scan_watch_workouts",
+    "scan_workout_folders",
     "survey_watch_workouts",
 ]

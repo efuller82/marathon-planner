@@ -35,6 +35,7 @@ from marathon_planner.mtp_workouts import (  # noqa: E402
     format_watch_scan_findings,
     format_watch_workout_scan,
     scan_watch_workouts,
+    scan_workout_folders,
     survey_watch_workouts,
 )
 
@@ -74,7 +75,9 @@ def fit_file_of_type(file_type: int) -> bytes:
     return content + struct.pack("<H", fit_crc(content))
 
 
-class WatchWorkoutSurveyTests(unittest.TestCase):
+class WatchDeviceTestCase(unittest.TestCase):
+    """One synthetic watch with the folder layout the real device has."""
+
     def setUp(self) -> None:
         self.encoded = synthetic_workout_bytes()
         self.transport = FakeMtpTransport()
@@ -143,6 +146,8 @@ class WatchWorkoutSurveyTests(unittest.TestCase):
         self.assertEqual(len(matches), 1, f"expected exactly one {wanted}")
         return matches[0]
 
+
+class WatchWorkoutSurveyTests(WatchDeviceTestCase):
     def test_survey_finds_absorbed_workouts_the_watch_renamed(self) -> None:
         # The watch renames what it absorbs, so the name on the device tells
         # the app nothing; the workout name inside the file is the anchor.
@@ -270,6 +275,124 @@ class WatchWorkoutSurveyTests(unittest.TestCase):
             any(item.skip_reason == "deeper than the survey looks" for item in deepest)
         )
 
+    def test_files_outside_the_workout_folders_are_counted_but_never_opened(
+        self,
+    ) -> None:
+        # The real watch keeps hundreds of small files under GARMIN that have
+        # nothing to do with workouts. They are listed, never read.
+        sports = self.transport.add_object(
+            self.device,
+            parent_object_id=self.garmin.object_id,
+            name="Sports",
+            kind=MtpObjectKind.FOLDER,
+        )
+        self.add_file(sports, "SPORT01.FIT", fit_file_of_type(2))
+        self.add_file(self.workouts, "WKT00001.FIT", self.encoded[Terrain.ROAD])
+
+        scan = self.scan()
+
+        self.assertEqual(len(scan.workouts), 1)
+        folder = self.folder(scan, "GARMIN", "Sports")
+        self.assertEqual(folder.not_opened_count, 1)
+        self.assertEqual(folder.workout_count, 0)
+        # Only the one file inside the workout folder was ever opened.
+        self.assertEqual(self.transport.call_log.count("readback.before"), 1)
+
+    def test_a_workout_folder_subfolder_is_still_read(self) -> None:
+        guided = self.transport.add_object(
+            self.device,
+            parent_object_id=self.workouts.object_id,
+            name="Guided",
+            kind=MtpObjectKind.FOLDER,
+        )
+        self.add_file(guided, "WKT00007.FIT", self.encoded[Terrain.TRAIL])
+
+        scan = self.scan()
+
+        self.assertEqual(len(scan.workouts), 1)
+        self.assertEqual(
+            scan.workouts[0].folder_path,
+            (PROFILE.storage_name, "GARMIN", "Workouts", "Guided"),
+        )
+
+
+class WorkoutFolderScanTests(WatchDeviceTestCase):
+    """The targeted scan a cleanup plans and revalidates against."""
+
+    def folders(self):
+        session = self.transport.open_session(self.device)
+        try:
+            return scan_workout_folders(session, PROFILE)
+        finally:
+            session.close()
+
+    def test_the_targeted_scan_reads_only_the_workout_folders(self) -> None:
+        sports = self.transport.add_object(
+            self.device,
+            parent_object_id=self.garmin.object_id,
+            name="Sports",
+            kind=MtpObjectKind.FOLDER,
+        )
+        self.add_file(sports, "SPORT01.FIT", fit_file_of_type(2))
+        self.add_file(self.workouts, "WKT00001.FIT", self.encoded[Terrain.ROAD])
+        self.add_file(
+            self.new_files,
+            "20300402-mp-w001-x01-trail-abcdef0123456789.fit",
+            self.encoded[Terrain.TRAIL],
+        )
+
+        folders = self.folders()
+
+        found = {
+            workout.filename for folder in folders for workout in folder.workouts
+        }
+        self.assertEqual(
+            found,
+            {"WKT00001.FIT", "20300402-mp-w001-x01-trail-abcdef0123456789.fit"},
+        )
+        self.assertEqual(self.transport.call_log.count("readback.before"), 2)
+        self.assertNotIn(
+            (PROFILE.storage_name, "GARMIN", "Sports"),
+            {folder.path for folder in folders},
+        )
+
+    def test_a_workout_folder_the_device_does_not_have_is_skipped(self) -> None:
+        transport = FakeMtpTransport()
+        device = transport.add_device(
+            manufacturer=PROFILE.manufacturer,
+            model=PROFILE.model,
+        )
+        storage = transport.add_object(
+            device,
+            parent_object_id=device.root_object_id,
+            name=PROFILE.storage_name,
+            kind=MtpObjectKind.STORAGE,
+        )
+        garmin = transport.add_object(
+            device,
+            parent_object_id=storage.object_id,
+            name="GARMIN",
+            kind=MtpObjectKind.FOLDER,
+        )
+        transport.add_object(
+            device,
+            parent_object_id=garmin.object_id,
+            name="Workouts",
+            kind=MtpObjectKind.FOLDER,
+        )
+        session = transport.open_session(device)
+        try:
+            folders = scan_workout_folders(session, PROFILE)
+        finally:
+            session.close()
+
+        self.assertEqual(
+            [folder.path for folder in folders],
+            [(PROFILE.storage_name, "GARMIN", "Workouts")],
+        )
+
+
+class StorageRefusalTests(WatchDeviceTestCase):
     def test_a_device_without_the_expected_storage_is_refused(self) -> None:
         transport = FakeMtpTransport()
         device = transport.add_device(

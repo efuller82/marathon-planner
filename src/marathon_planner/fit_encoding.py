@@ -374,6 +374,22 @@ def _display_date(workout_date: date) -> str:
     return f"{FIT_MONTH_ABBREVIATIONS[workout_date.month - 1]} {workout_date.day}"
 
 
+def authored_date_from_filename(filename: str) -> date | None:
+    """Recover the authored date this encoder puts at the front of a filename.
+
+    Every workout file is named ``YYYYMMDD-<workout id>.fit``. Once a watch
+    absorbs a file it renames it, so this only reads names the app itself
+    wrote and recorded; anything else reports ``None`` rather than a guess.
+    """
+
+    if not isinstance(filename, str) or len(filename) < 9 or filename[8] != "-":
+        return None
+    try:
+        return datetime.strptime(filename[:8], "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
 def _canonical_workout_date(value: str) -> date:
     try:
         parsed = date.fromisoformat(value)

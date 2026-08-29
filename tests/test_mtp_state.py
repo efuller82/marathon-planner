@@ -19,9 +19,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from marathon_planner.mtp_state import (  # noqa: E402
     MTP_JOURNAL_FORMAT,
     MTP_OWNERSHIP_FORMAT,
+    MtpConsumedWorkout,
     MtpDeviceOwnership,
     MtpJournal,
     MtpJournalAction,
+    MtpJournalKind,
     MtpJournalOperation,
     MtpJournalPhase,
     MtpOwnedObject,
@@ -301,6 +303,149 @@ class MtpStateStoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(MtpStateError, "unsafe"):
             self.store.read_ownership()
+
+
+class StateSchemaMigrationTests(unittest.TestCase):
+    """State written by an earlier release still reads, and is upgraded."""
+
+    def version_one_ownership(self) -> dict[str, object]:
+        return {
+            "format": MTP_OWNERSHIP_FORMAT,
+            "schema_version": 1,
+            "devices": [
+                {
+                    "device_binding": BINDING,
+                    "profile_id": "synthetic-forerunner-265-v1",
+                    "objects": [
+                        {
+                            "filename": "20300402-synthetic-road.fit",
+                            "size": len(b"synthetic FIT bytes"),
+                            "sha256": DIGEST,
+                            "destination_persistent_id": "persistent-newfiles",
+                            "object_persistent_id": "persistent-one",
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def test_version_one_ownership_reads_with_nothing_remembered(self) -> None:
+        with TemporaryDirectory() as root:
+            store = MtpStateStore(root)
+            Path(root, "ownership.json").write_text(
+                json.dumps(self.version_one_ownership()), encoding="utf-8"
+            )
+
+            read = store.read_ownership()
+
+            self.assertEqual(len(read.devices), 1)
+            self.assertEqual(len(read.devices[0].objects), 1)
+            self.assertEqual(read.devices[0].consumed, ())
+
+    def test_writing_upgrades_version_one_ownership_in_place(self) -> None:
+        with TemporaryDirectory() as root:
+            store = MtpStateStore(root)
+            Path(root, "ownership.json").write_text(
+                json.dumps(self.version_one_ownership()), encoding="utf-8"
+            )
+
+            store.write_ownership(store.read_ownership())
+
+            written = json.loads(Path(root, "ownership.json").read_text("utf-8"))
+            self.assertEqual(written["schema_version"], 2)
+            self.assertEqual(written["devices"][0]["consumed"], [])
+            self.assertEqual(store.read_ownership(), store.read_ownership())
+
+    def test_a_version_one_journal_reads_back_as_an_installation(self) -> None:
+        with TemporaryDirectory() as root:
+            store = MtpStateStore(root)
+            document = {
+                "format": MTP_JOURNAL_FORMAT,
+                "schema_version": 1,
+                "transaction_id": "synthetic-transaction-1",
+                "phase": MtpJournalPhase.PREPARED.value,
+                "device_binding": BINDING,
+                "profile_id": "synthetic-forerunner-265-v1",
+                "session_generation": 3,
+                "destination_persistent_id": "persistent-newfiles",
+                "operations": [
+                    {
+                        "action": MtpJournalAction.COPY.value,
+                        "filename": "20300402-synthetic-road.fit",
+                        "size": len(b"synthetic FIT bytes"),
+                        "sha256": DIGEST,
+                        "destination_persistent_id": "persistent-newfiles",
+                        "object_persistent_id": None,
+                        "object_id": None,
+                        "completed": False,
+                    }
+                ],
+            }
+            Path(root, "journal.json").write_text(
+                json.dumps(document), encoding="utf-8"
+            )
+
+            read = store.read_journal()
+
+            self.assertIsNotNone(read)
+            self.assertIs(read.kind, MtpJournalKind.INSTALL)
+
+    def test_an_unsupported_schema_version_is_refused(self) -> None:
+        with TemporaryDirectory() as root:
+            store = MtpStateStore(root)
+            document = self.version_one_ownership()
+            document["schema_version"] = 99
+            Path(root, "ownership.json").write_text(
+                json.dumps(document), encoding="utf-8"
+            )
+
+            with self.assertRaises(MtpStateError):
+                store.read_ownership()
+
+
+class ConsumedWorkoutTests(unittest.TestCase):
+    def consumed(self, **overrides) -> MtpConsumedWorkout:
+        fields = {
+            "installed_filename": "20300402-synthetic-road.fit",
+            "size": 224,
+            "sha256": DIGEST,
+            "authored_date": "2030-04-02",
+        }
+        fields.update(overrides)
+        return MtpConsumedWorkout(**fields)
+
+    def test_a_remembered_workout_survives_a_write_and_read(self) -> None:
+        with TemporaryDirectory() as root:
+            store = MtpStateStore(root)
+            written = MtpOwnershipCatalog(
+                (
+                    MtpDeviceOwnership(
+                        device_binding=BINDING,
+                        profile_id="synthetic-forerunner-265-v1",
+                        objects=(),
+                        consumed=(self.consumed(),),
+                    ),
+                )
+            )
+
+            store.write_ownership(written)
+
+            self.assertEqual(store.read_ownership(), written)
+
+    def test_an_unusable_authored_date_is_refused(self) -> None:
+        for value in ("2030-4-2", "not a date", "2030-02-30", ""):
+            with self.subTest(value=value):
+                with self.assertRaises(MtpStateError):
+                    self.consumed(authored_date=value)
+
+    def test_two_records_for_the_same_content_are_refused(self) -> None:
+        with self.assertRaisesRegex(MtpStateError, "digests must be unique"):
+            MtpDeviceOwnership(
+                device_binding=BINDING,
+                profile_id="synthetic-forerunner-265-v1",
+                objects=(),
+                consumed=(self.consumed(), self.consumed(size=999)),
+            )
 
 
 if __name__ == "__main__":

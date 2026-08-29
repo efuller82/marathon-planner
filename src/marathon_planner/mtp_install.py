@@ -14,18 +14,22 @@ from enum import StrEnum
 from hashlib import sha256
 import re
 import secrets
+from typing import Callable
 
 from marathon_planner.fit_encoding import (
     FitEncodingError,
     Terrain,
     TerrainSelection,
+    authored_date_from_filename,
     encode_plan_workouts,
 )
 from marathon_planner.models import TrainingPlan
 from marathon_planner.mtp_state import (
+    MtpConsumedWorkout,
     MtpDeviceOwnership,
     MtpJournal,
     MtpJournalAction,
+    MtpJournalKind,
     MtpJournalOperation,
     MtpJournalPhase,
     MtpOwnedObject,
@@ -89,6 +93,14 @@ class MtpCompatibilityProfile:
     model: str
     storage_name: str
     destination_path: tuple[str, ...]
+    # Where workouts live on this device: the folder the watch keeps them in
+    # once it has absorbed them, and the incoming folder they arrive in. The
+    # owner-run survey of a Forerunner 265 on 2026-08-28 found workouts in
+    # these two places and nowhere else across the whole storage.
+    workout_paths: tuple[tuple[str, ...], ...] = (
+        ("GARMIN", "Workouts"),
+        ("GARMIN", "NewFiles"),
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.profile_id, str) or _PROFILE_TOKEN.fullmatch(
@@ -110,6 +122,27 @@ class MtpCompatibilityProfile:
                 raise MtpInstallError(
                     "The MTP destination profile path is invalid."
                 ) from error
+        if not isinstance(self.workout_paths, tuple) or not self.workout_paths:
+            raise MtpInstallError("The MTP workout profile paths are invalid.")
+        for path in self.workout_paths:
+            if not isinstance(path, tuple) or not path:
+                raise MtpInstallError("The MTP workout profile paths are invalid.")
+            for name in path:
+                try:
+                    validate_object_name(name)
+                except MtpError as error:
+                    raise MtpInstallError(
+                        "The MTP workout profile paths are invalid."
+                    ) from error
+
+    def holds_workouts(self, relative_path: tuple[str, ...]) -> bool:
+        """Whether a folder inside this device's storage can hold workouts."""
+
+        folded = tuple(name.casefold() for name in relative_path)
+        return any(
+            folded[: len(path)] == tuple(name.casefold() for name in path)
+            for path in self.workout_paths
+        )
 
     @property
     def display_destination(self) -> str:
@@ -596,6 +629,11 @@ def recover_mtp_install(
         journal = state_store.read_journal()
         if journal is None:
             raise MtpInstallError("There is no MTP installation to recover.")
+        if journal.kind is not MtpJournalKind.INSTALL:
+            raise MtpInstallError(
+                "The interrupted MTP transaction is a workout cleanup, not an "
+                "installation. Finish it from the cleanup window instead."
+            )
         if journal.profile_id != profile.profile_id:
             raise MtpInstallError(
                 "The MTP recovery journal belongs to a different profile."
@@ -672,7 +710,27 @@ def _catalog_from_noop_preview(preview: MtpInstallPreview) -> MtpOwnershipCatalo
         device_binding=preview._device_binding,
         profile_id=preview.profile_id,
         objects=objects,
+        consumed=remembered_consumed_workouts(
+            _existing_consumed(
+                preview._planning_state.ownership,
+                preview._device_binding,
+            ),
+            preview._consumed,
+            reinstalled_filenames=frozenset(
+                item.filename.casefold() for item in preview._desired
+            ),
+        ),
     )
+
+
+def _existing_consumed(
+    catalog: MtpOwnershipCatalog,
+    device_binding: str,
+) -> tuple[MtpConsumedWorkout, ...]:
+    for device in catalog.devices:
+        if device.device_binding == device_binding:
+            return device.consumed
+    return ()
 
 
 def _prepared_journal(preview: MtpInstallPreview) -> MtpJournal:
@@ -782,7 +840,7 @@ def _resume_mtp_transaction(
     for index, operation in enumerate(current.operations):
         if operation.action is not MtpJournalAction.REMOVE:
             continue
-        completed = _complete_remove_operation(session, destination, operation)
+        completed = remove_verified_object(session, destination, operation)
         cleanup_catalog = state_store.read_ownership()
         updated_catalog = _catalog_without_removed_object(
             cleanup_catalog,
@@ -908,12 +966,28 @@ def _complete_copy_operation(
     )
 
 
-def _complete_remove_operation(
+def remove_verified_object(
     session: MtpSession,
     destination: MtpObjectInfo,
     operation: MtpJournalOperation,
+    *,
+    inventory_of: Callable[[], tuple[MtpObjectInfo, ...]] | None = None,
 ) -> MtpJournalOperation:
-    inventory = _destination_inventory(session, destination)
+    """Delete one journaled object after proving it is still that object.
+
+    The object is re-read and its digest checked immediately before the
+    single nonrecursive delete, and the folder is re-listed afterwards to
+    prove it went and that nothing took its place. Any ambiguity raises.
+
+    ``inventory_of`` lets a caller supply its own folder listing. Workout
+    storage on a watch holds subfolders, which the install destination never
+    does, so cleanup passes a listing that skips them.
+    """
+
+    read_inventory = inventory_of or (
+        lambda: _destination_inventory(session, destination)
+    )
+    inventory = read_inventory()
     by_persistent_id = {item.persistent_id: item for item in inventory}
     live = by_persistent_id.get(operation.object_persistent_id)
     if live is None:
@@ -931,7 +1005,7 @@ def _complete_remove_operation(
     try:
         session.delete_object(live.object_id)
     except MtpError:
-        after = _destination_inventory(session, destination)
+        after = read_inventory()
         if any(item.persistent_id == operation.object_persistent_id for item in after):
             raise
         if any(
@@ -943,7 +1017,7 @@ def _complete_remove_operation(
                 f"{operation.filename}"
             )
     else:
-        after = _destination_inventory(session, destination)
+        after = read_inventory()
         if any(item.persistent_id == operation.object_persistent_id for item in after):
             raise MtpInstallError(
                 f"An owned MTP object remained after cleanup: {operation.filename}"
@@ -1141,6 +1215,11 @@ def _precleanup_ownership_catalog(
         device_binding=journal.device_binding,
         profile_id=journal.profile_id,
         objects=tuple(precleanup_objects),
+        consumed=remembered_consumed_workouts(
+            current_device.consumed,
+            consumed,
+            reinstalled_filenames=frozenset(desired_names),
+        ),
     )
 
 
@@ -1184,6 +1263,7 @@ def _catalog_without_removed_object(
         device_binding=journal.device_binding,
         profile_id=journal.profile_id,
         objects=tuple(retained),
+        consumed=device.consumed,
     )
 
 
@@ -1208,8 +1288,12 @@ def _replace_device_ownership(
     device_binding: str,
     profile_id: str,
     objects: tuple[MtpOwnedObject, ...],
+    consumed: tuple[MtpConsumedWorkout, ...] = (),
 ) -> MtpOwnershipCatalog:
-    replacement = MtpDeviceOwnership(device_binding, profile_id, objects)
+    replacement = MtpDeviceOwnership(device_binding, profile_id, objects, consumed)
+    # A device with nothing live but a remembered absorbed workout still has
+    # to stay in the catalog, or the app forgets what it installed.
+    keep = bool(objects or consumed)
     devices: list[MtpDeviceOwnership] = []
     found = False
     for device in catalog.devices:
@@ -1217,11 +1301,52 @@ def _replace_device_ownership(
             devices.append(device)
             continue
         found = True
-        if objects:
+        if keep:
             devices.append(replacement)
-    if not found and objects:
+    if not found and keep:
         devices.append(replacement)
     return MtpOwnershipCatalog(tuple(devices))
+
+
+def remembered_consumed_workouts(
+    existing: tuple[MtpConsumedWorkout, ...],
+    absorbed: tuple[MtpOwnedObject, ...],
+    *,
+    reinstalled_filenames: frozenset[str] = frozenset(),
+) -> tuple[MtpConsumedWorkout, ...]:
+    """Remember workouts the watch absorbed instead of forgetting them.
+
+    A workout the watch has taken is no longer at the address the app copied
+    it to, but its content is unchanged, so its digest still identifies it
+    later. One being reinstalled in this same run stays a live owned object
+    and is not remembered here.
+    """
+
+    known = {item.sha256: item for item in existing}
+    for record in absorbed:
+        if record.filename.casefold() in reinstalled_filenames:
+            continue
+        authored = authored_date_from_filename(record.filename)
+        if authored is None:
+            # Without an authored date the cleanup defaults have nothing to
+            # work from, so the workout is left unremembered rather than
+            # remembered with a guessed date.
+            continue
+        known.setdefault(
+            record.sha256,
+            MtpConsumedWorkout(
+                installed_filename=record.filename,
+                size=record.size,
+                sha256=record.sha256,
+                authored_date=authored.isoformat(),
+            ),
+        )
+    return tuple(
+        sorted(
+            known.values(),
+            key=lambda item: (item.authored_date, item.installed_filename.casefold()),
+        )
+    )
 
 
 def _validate_journal_desired(
