@@ -44,6 +44,14 @@
   keeps its exact bytes. That byte-for-byte match against a local record is
   the app's only proof that it installed a workout; a name is never enough,
   because the watch renames what it takes.**
+- **An interrupted installation whose workout files all reached the watch
+  now finishes on its own** (issue #23, branch
+  `feature/23-journal-only-recovery`, awaiting the owner-run check). The
+  "Recover interrupted installation" button no longer waits for a plan to be
+  imported, and in that case needs no plan open — a different plan may even
+  be open. An installation that still had files to copy is unchanged: it
+  demands the same plan, week block, and terrain, and the same file contents
+  byte for byte, and the app says so when pressed.
 - The desktop app exports the complete open plan as one deterministic local
   ZIP with a hashed manifest. The USB and Forerunner 265 MTP installers
   preview and apply an explicit week block with device-bound ownership,
@@ -53,50 +61,64 @@
   absorbed instead of forgetting them, and marks each recovery journal as an
   installation or a cleanup. A version 1 file written by an earlier release
   still loads and is upgraded the next time state is saved.
-- The full gate compiles the project and runs 309 unit tests using only
+- The full gate compiles the project and runs 320 unit tests using only
   synthetic data; one Windows symbolic-link permission test skips.
 
 ## This session
 
-- **Shipped issue #18 end to end.** The owner widened it first: the app must
-  show what is actually on the watch and let the runner remove any of it, not
-  only what the app can prove it installed. The earlier acceptance criteria
-  said the opposite, so the issue was rewritten before any code was written.
-- **The owner-run investigation settled the design.** Absorbed workouts stay
-  readable in `GARMIN/Workouts`; across roughly 85 folders and 570 files,
-  workouts live only there and in the incoming folder. Two of the four
-  workouts found still carried the authored date, and the other two never had
-  one — they predate issue #17. The four sizes formed two pairs six bytes
-  apart, exactly the length of the `"Apr 2 "` prefix, so the watch had been
-  carrying the same two workouts twice, once from each install.
-- **The owner-run removal check passed**, closing the last acceptance
-  criterion. PR #25 merged on green checks and the card moved to Done.
-- **What was learned and is worth keeping:** the watch preserves an imported
-  workout's bytes exactly, so a content digest is a reliable identity anchor
-  after the rename. The on-watch name gives only a month and day, never a
-  year, so the removal defaults take the year from the app's own record and
-  never infer one for a workout the app cannot vouch for.
-- **One deliberate deviation, recorded on the issue.** Replacing a block is
-  two confirmations rather than one: the incoming workouts must be on the
-  watch before the app can list them beside what was already there and prove
-  which is which. After an installation the app offers the removal list with
-  the installed block's start date already applied.
-- **The read-only survey now opens far less of the device.** It reads file
-  contents only in the two folders that hold workouts, instead of opening
-  every small file it met. The owner's watch has over five hundred unrelated
-  files under GARMIN; none are opened any more.
+- **Started and implemented issue #23.** The plan was posted on the issue
+  before any code was written, as the owner asked. Branch cut from a current
+  `master`; the board card moved to In Progress.
+- **What changed for the runner.** On 2026-08-25 a fully-completed
+  installation could not be recovered, because recovery insisted on
+  rebuilding the original workout files from an open plan and matching them
+  exactly — and the file format had changed since. That journal had to be
+  reviewed and archived by hand, leaving the files it had installed unowned.
+  Now, when the record shows every file already reached the watch, recovery
+  finishes from that record alone. The remaining work in that case is local
+  bookkeeping and any deletions the install had already committed to, and
+  the record describes both.
+- **What stayed strict.** If any file was still being copied, nothing about
+  recovery changed: the same plan, week block, and terrain, and the same file
+  contents, are still required before the app touches the watch. Only
+  workouts the app can prove it installed are ever deleted, and anything
+  ambiguous still stops with a message that says what to do.
+- **One deliberate widening, recorded on the issue.** The issue said "a
+  journal in the copies-verified phase". The record also carries a coarse
+  progress stamp written *after* the last file is marked done, so an install
+  interrupted in that gap has every file on the watch but still carries the
+  earlier stamp. Refusing it would recreate the exact permanent-refusal
+  problem being fixed, so the app keys off "every file is marked done"
+  instead.
+- **A separate defect found and fixed while tracing this.** The final step of
+  a normal installation was throwing away the app's memory of workouts the
+  watch had absorbed — silently undoing the "remember what the watch took"
+  behavior that shipped with the watch-cleanup work. It is fixed in its own
+  commit with its own test, which fails without the fix.
+- **A UI blocker found and fixed.** The "Recover interrupted installation"
+  button had been disabled until a plan was imported, which would have made
+  the whole no-plan-needed path unreachable. It is now live from startup,
+  beside the other buttons that need no plan. Confirmed on the owner's
+  display at 150% scaling with a screenshot, not tests alone.
+- **Ten new synthetic tests**, covering both journal states, the ownership
+  outcome including an absorbed copy, ownership the journal never touched,
+  an unrelated file left untouched, the absorbed-memory defect, and the app's
+  two recovery routes. The full local gate passes: 320 tests, one skip.
 
 ## Next
 
-1. Owner decision: prioritize issue #23 (let recovery finish a fully-verified
-   install from the journal alone). It is the only feature left on the board
-   that is not blocked on hardware. Nothing is in progress, so the next
-   session should take it unless the owner names something else.
-2. Owner decision: align the export package README wording with the BOTH
+1. **Owner action: run the watch check for issue #23.** Connect the
+   Forerunner 265 and confirm that an interrupted installation whose files
+   all landed can be finished with no plan open. Everything else on the issue
+   is done; this is the last acceptance criterion. The branch is
+   `feature/23-journal-only-recovery`.
+2. Open the pull request for issue #23 and merge on green checks, then move
+   the card to Done.
+3. Owner decision: align the export package README wording with the BOTH
    install default (small follow-up, no issue filed).
-3. Worth watching, no action yet: the app now keeps a record of every workout
-   the watch absorbs, and drops one only when it can see the workout is gone
-   from the watch. If that list ever grows in a way that surprises the owner,
+4. Worth watching, no action yet: the app keeps a record of every workout the
+   watch absorbs, and drops one only when it can see the workout is gone from
+   the watch. If that list ever grows in a way that surprises the owner,
    revisit how records are retired.
 
 ## Blockers

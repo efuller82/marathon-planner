@@ -609,20 +609,51 @@ def apply_mtp_install(
         ) from error
 
 
+def journal_recovers_without_workout_bytes(journal: object) -> bool:
+    """Report whether one journal can be finished without the original bytes.
+
+    When every copy is already marked completed it also carries a verified
+    device identity, so the only work left is the journaled removals and the
+    local ownership record — both fully described by the journal itself. A
+    journal still holding an unfinished copy, or one flagged for manual
+    review, always needs the exact workout bytes it set out to write.
+    """
+
+    if not isinstance(journal, MtpJournal):
+        return False
+    if journal.kind is not MtpJournalKind.INSTALL:
+        return False
+    if journal.phase is MtpJournalPhase.INDETERMINATE:
+        return False
+    return all(
+        operation.completed
+        for operation in journal.operations
+        if operation.action is MtpJournalAction.COPY
+    )
+
+
 def recover_mtp_install(
     transport: MtpTransport,
     profile: MtpCompatibilityProfile,
     *,
     state_store: MtpStateStore,
-    desired: tuple[MtpDesiredObject, ...],
+    desired: tuple[MtpDesiredObject, ...] | None = None,
 ) -> MtpInstallResult:
-    """Resume one durable journal forward without rolling device changes back."""
+    """Resume one durable journal forward without rolling device changes back.
+
+    ``desired`` carries the exact workout bytes the interrupted install was
+    writing. Pass ``None`` to finish a journal whose copies are all already
+    completed and verified: nothing has to be written to the device, so the
+    journal alone proves what to remove and what to own. A journal with any
+    unfinished copy still demands those exact bytes.
+    """
 
     if not isinstance(profile, MtpCompatibilityProfile):
         raise MtpInstallError("The MTP compatibility profile is invalid.")
     if not isinstance(state_store, MtpStateStore):
         raise MtpInstallError("The MTP local state store is invalid.")
-    _validate_desired(desired)
+    if desired is not None:
+        _validate_desired(desired)
     transaction_id: str | None = None
     session: MtpSession | None = None
     try:
@@ -633,6 +664,13 @@ def recover_mtp_install(
             raise MtpInstallError(
                 "The interrupted MTP transaction is a workout cleanup, not an "
                 "installation. Finish it from the cleanup window instead."
+            )
+        if desired is None and not journal_recovers_without_workout_bytes(journal):
+            raise MtpInstallError(
+                "The interrupted MTP installation still has workout files to "
+                "copy, so it cannot be finished from its record alone. Open the "
+                "same plan, select the same week block and terrain, then "
+                "recover."
             )
         if journal.profile_id != profile.profile_id:
             raise MtpInstallError(
@@ -793,7 +831,7 @@ def _resume_mtp_transaction(
     *,
     state_store: MtpStateStore,
     journal: MtpJournal,
-    desired: tuple[MtpDesiredObject, ...],
+    desired: tuple[MtpDesiredObject, ...] | None,
     recovered: bool,
 ) -> MtpInstallResult:
     destination = _find_destination(session, profile)
@@ -804,8 +842,12 @@ def _resume_mtp_transaction(
         raise MtpInstallError(
             "The MTP recovery destination does not match the durable journal."
         )
-    _validate_journal_desired(journal, desired)
-    desired_by_name = {item.filename.casefold(): item for item in desired}
+    if desired is None:
+        _validate_journal_destinations(journal)
+        desired_by_name: dict[str, MtpDesiredObject] = {}
+    else:
+        _validate_journal_desired(journal, desired)
+        desired_by_name = {item.filename.casefold(): item for item in desired}
     current = journal
 
     for index, operation in enumerate(current.operations):
@@ -815,7 +857,7 @@ def _resume_mtp_transaction(
             session,
             destination,
             operation,
-            desired_by_name[operation.filename.casefold()],
+            desired_by_name.get(operation.filename.casefold()),
             allow_create=not recovered,
         )
         if completed != operation:
@@ -826,13 +868,21 @@ def _resume_mtp_transaction(
 
     current = replace(current, phase=MtpJournalPhase.COPIES_VERIFIED)
     state_store.write_journal(current)
-    precleanup_catalog = _precleanup_ownership_catalog(
-        session,
-        destination,
-        state_store.read_ownership(),
-        current,
-        desired,
-    )
+    if desired is None:
+        precleanup_catalog = _journal_only_ownership_catalog(
+            session,
+            destination,
+            state_store.read_ownership(),
+            current,
+        )
+    else:
+        precleanup_catalog = _precleanup_ownership_catalog(
+            session,
+            destination,
+            state_store.read_ownership(),
+            current,
+            desired,
+        )
     state_store.write_ownership(precleanup_catalog)
 
     current = replace(current, phase=MtpJournalPhase.CLEANUP)
@@ -865,7 +915,7 @@ def _resume_mtp_transaction(
         profile=profile,
     )
     final_inventory = _destination_inventory(session, destination)
-    verified_final, _consumed_final = _verify_owned_objects(
+    verified_final, consumed_final = _verify_owned_objects(
         session,
         destination,
         final_inventory,
@@ -876,24 +926,35 @@ def _resume_mtp_transaction(
         device_binding=current.device_binding,
         profile_id=current.profile_id,
         objects=tuple(item.ownership for item in verified_final),
+        # A workout the watch absorbed is no longer a live file, but it is
+        # still on the watch and still this app's to remove later, so it
+        # moves to the remembered list rather than being forgotten.
+        consumed=remembered_consumed_workouts(
+            final_device.consumed,
+            consumed_final,
+        ),
     )
     if reconciled_catalog != final_catalog:
         state_store.write_ownership(reconciled_catalog)
     if state_store.read_ownership() != reconciled_catalog:
         raise MtpInstallError("MTP ownership could not be verified before completion.")
     state_store.clear_journal(current.transaction_id)
+    copied = sum(
+        operation.action is MtpJournalAction.COPY
+        for operation in current.operations
+    )
+    removed = sum(
+        operation.action is MtpJournalAction.REMOVE
+        for operation in current.operations
+    )
     return MtpInstallResult(
         profile.manufacturer,
         profile.model,
-        len(desired),
-        sum(
-            operation.action is MtpJournalAction.COPY
-            for operation in current.operations
-        ),
-        sum(
-            operation.action is MtpJournalAction.REMOVE
-            for operation in current.operations
-        ),
+        # Without the intended set, the journal only knows what it copied;
+        # workouts already on the device were never named in it.
+        len(desired) if desired is not None else copied,
+        copied,
+        removed,
         recovered,
     )
 
@@ -902,7 +963,7 @@ def _complete_copy_operation(
     session: MtpSession,
     destination: MtpObjectInfo,
     operation: MtpJournalOperation,
-    desired: MtpDesiredObject,
+    desired: MtpDesiredObject | None,
     *,
     allow_create: bool,
 ) -> MtpJournalOperation:
@@ -938,6 +999,10 @@ def _complete_copy_operation(
             f"The copy was not durably verified for: {operation.filename}. "
             "Review the named object manually; recovery will not retry it "
             "automatically."
+        )
+    if desired is None:
+        raise MtpInstallError(
+            f"The workout bytes are unavailable for: {operation.filename}"
         )
 
     upload_id = session.create_file(
@@ -1054,6 +1119,105 @@ def _verify_journaled_file(
         raise MtpInstallError(
             f"A journaled MTP object failed full readback: {operation.filename}"
         )
+
+
+def _journal_only_ownership_catalog(
+    session: MtpSession,
+    destination: MtpObjectInfo,
+    catalog: MtpOwnershipCatalog,
+    journal: MtpJournal,
+) -> MtpOwnershipCatalog:
+    """Rebuild ownership for a journal whose copies are all already verified.
+
+    Without the original workout bytes there is no intended set to reconcile
+    against, so ownership becomes exactly what can be proven right now: every
+    record already owned that is still on the device, plus every journaled
+    copy that is still on the device. Journaled removals stay owned until
+    each delete is confirmed, so an interruption never leaves a live file
+    unowned. A workout the watch has absorbed is remembered by its content
+    instead of being claimed as a live file.
+    """
+
+    current_device = next(
+        (
+            device
+            for device in catalog.devices
+            if device.device_binding == journal.device_binding
+        ),
+        MtpDeviceOwnership(journal.device_binding, journal.profile_id, ()),
+    )
+    if current_device.profile_id != journal.profile_id:
+        raise MtpInstallError(
+            "Local MTP ownership is bound to a different compatibility profile."
+        )
+    inventory = _destination_inventory(session, destination)
+    verified, consumed = _verify_owned_objects(
+        session,
+        destination,
+        inventory,
+        current_device,
+    )
+    objects = [item.ownership for item in verified]
+    owned_by_persistent_id = {
+        record.object_persistent_id: record for record in objects
+    }
+    live_by_persistent_id = {item.persistent_id: item for item in inventory}
+    absorbed: list[MtpOwnedObject] = []
+    live_copy_names: set[str] = set()
+    for operation in journal.operations:
+        if operation.action is not MtpJournalAction.COPY:
+            continue
+        if not operation.completed or operation.object_persistent_id is None:
+            raise MtpInstallError(
+                f"A journaled MTP copy is not verified: {operation.filename}"
+            )
+        record = MtpOwnedObject(
+            operation.filename,
+            operation.size,
+            operation.sha256,
+            journal.destination_persistent_id,
+            operation.object_persistent_id,
+        )
+        live = live_by_persistent_id.get(operation.object_persistent_id)
+        if live is None:
+            if any(
+                item.name.casefold() == operation.filename.casefold()
+                for item in inventory
+            ):
+                raise MtpInstallError(
+                    f"A different object now uses a journaled filename: "
+                    f"{operation.filename}"
+                )
+            absorbed.append(record)
+            continue
+        live_copy_names.add(operation.filename.casefold())
+        prior = owned_by_persistent_id.get(operation.object_persistent_id)
+        if prior is not None:
+            # Already read back and proven live by the ownership check above.
+            if (
+                prior.filename.casefold() != record.filename.casefold()
+                or prior.size != record.size
+                or prior.sha256 != record.sha256
+                or prior.destination_persistent_id != record.destination_persistent_id
+            ):
+                raise MtpInstallError(
+                    f"MTP ownership changed during recovery: {operation.filename}"
+                )
+            continue
+        _verify_journaled_file(session, destination, operation, live)
+        owned_by_persistent_id[operation.object_persistent_id] = record
+        objects.append(record)
+    return _replace_device_ownership(
+        catalog,
+        device_binding=journal.device_binding,
+        profile_id=journal.profile_id,
+        objects=tuple(objects),
+        consumed=remembered_consumed_workouts(
+            current_device.consumed,
+            consumed + tuple(absorbed),
+            reinstalled_filenames=frozenset(live_copy_names),
+        ),
+    )
 
 
 def _precleanup_ownership_catalog(
@@ -1349,15 +1513,20 @@ def remembered_consumed_workouts(
     )
 
 
+def _validate_journal_destinations(journal: MtpJournal) -> None:
+    for operation in journal.operations:
+        if operation.destination_persistent_id != journal.destination_persistent_id:
+            raise MtpInstallError("An MTP journal operation names another destination.")
+
+
 def _validate_journal_desired(
     journal: MtpJournal,
     desired: tuple[MtpDesiredObject, ...],
 ) -> None:
     _validate_desired(desired)
+    _validate_journal_destinations(journal)
     by_name = {item.filename.casefold(): item for item in desired}
     for operation in journal.operations:
-        if operation.destination_persistent_id != journal.destination_persistent_id:
-            raise MtpInstallError("An MTP journal operation names another destination.")
         if operation.action is MtpJournalAction.COPY:
             wanted = by_name.get(operation.filename.casefold())
             if wanted is None or (

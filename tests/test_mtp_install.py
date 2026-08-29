@@ -715,6 +715,41 @@ class MtpInstallPlanningTests(unittest.TestCase):
                 )
             )
 
+    def test_installing_keeps_the_record_of_a_workout_the_watch_absorbed(
+        self,
+    ) -> None:
+        absorbed = MtpOwnedObject(
+            filename="20300402-absorbed-road.fit",
+            size=len(b"absorbed FIT"),
+            sha256=sha256(b"absorbed FIT").hexdigest(),
+            destination_persistent_id="persistent-newfiles",
+            object_persistent_id="persistent-absorbed",
+        )
+        ownership = self.catalog(absorbed)
+        desired = MtpDesiredObject("20300409-new-road.fit", b"new FIT")
+        preview = self.preview(desired, ownership=ownership)
+        self.assertEqual(preview.consumed_filenames, (absorbed.filename,))
+        with TemporaryDirectory() as temporary:
+            store = MtpStateStore(Path(temporary) / "state")
+            store.persist_planning_salt(
+                MtpPlanningState(MtpOwnershipCatalog(), SALT, False)
+            )
+            store.write_ownership(ownership)
+
+            apply_mtp_install(preview, state_store=store, confirmed=True)
+
+            device = store.read_ownership().devices[0]
+            self.assertEqual(
+                tuple(item.filename for item in device.objects),
+                (desired.filename,),
+            )
+            self.assertEqual(
+                tuple(item.installed_filename for item in device.consumed),
+                (absorbed.filename,),
+            )
+            self.assertEqual(device.consumed[0].sha256, absorbed.sha256)
+            self.assertEqual(device.consumed[0].authored_date, "2030-04-02")
+
 
 if __name__ == "__main__":
     unittest.main()
