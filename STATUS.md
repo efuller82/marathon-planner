@@ -45,10 +45,9 @@
   the app's only proof that it installed a workout; a name is never enough,
   because the watch renames what it takes.**
 - **An interrupted installation whose workout files all reached the watch
-  now finishes on its own** (issue #23, branch
-  `feature/23-journal-only-recovery`, awaiting the owner-run check). The
-  "Recover interrupted installation" button no longer waits for a plan to be
-  imported, and in that case needs no plan open — a different plan may even
+  now finishes on its own** (issue #23 closed, PR #26 merged 2026-08-28).
+  The "Recover interrupted installation" button no longer waits for a plan to
+  be imported, and in that case needs no plan open — a different plan may even
   be open. An installation that still had files to copy is unchanged: it
   demands the same plan, week block, and terrain, and the same file contents
   byte for byte, and the app says so when pressed.
@@ -66,9 +65,9 @@
 
 ## This session
 
-- **Started and implemented issue #23.** The plan was posted on the issue
-  before any code was written, as the owner asked. Branch cut from a current
-  `master`; the board card moved to In Progress.
+- **Shipped issue #23 end to end.** The plan was posted on the issue before
+  any code was written, as the owner asked. PR #26 merged on green checks and
+  the card moved to Done.
 - **What changed for the runner.** On 2026-08-25 a fully-completed
   installation could not be recovered, because recovery insisted on
   rebuilding the original workout files from an open plan and matching them
@@ -100,26 +99,32 @@
   the whole no-plan-needed path unreachable. It is now live from startup,
   beside the other buttons that need no plan. Confirmed on the owner's
   display at 150% scaling with a screenshot, not tests alone.
-- **Ten new synthetic tests**, covering both journal states, the ownership
+- **Eleven new synthetic tests**, covering both journal states, the ownership
   outcome including an absorbed copy, ownership the journal never touched,
   an unrelated file left untouched, the absorbed-memory defect, and the app's
   two recovery routes. The full local gate passes: 320 tests, one skip.
 
 ## Next
 
-1. **Owner action: run the watch check for issue #23.** Connect the
-   Forerunner 265 and confirm that an interrupted installation whose files
-   all landed can be finished with no plan open. Everything else on the issue
-   is done; this is the last acceptance criterion. The branch is
-   `feature/23-journal-only-recovery`.
-2. Open the pull request for issue #23 and merge on green checks, then move
-   the card to Done.
-3. Owner decision: align the export package README wording with the BOTH
+1. **Owner decision: what to take next.** Nothing is in progress and the
+   board has no unblocked feature card left. Everything else below is a
+   small follow-up, an optional check, or housekeeping.
+2. Owner decision: align the export package README wording with the BOTH
    install default (small follow-up, no issue filed).
+3. **Optional owner check, not required by any issue.** The archived journal
+   from 2026-08-25 — the one that could not be recovered and had to be
+   reviewed by hand — is exactly what issue #23 was built for. Restoring it
+   into the local MTP state folder and pressing "Recover interrupted
+   installation" with no plan open is the most faithful real-watch test
+   available for the new behavior.
 4. Worth watching, no action yet: the app keeps a record of every workout the
    watch absorbs, and drops one only when it can see the workout is gone from
-   the watch. If that list ever grows in a way that surprises the owner,
-   revisit how records are retired.
+   the watch. This session fixed a defect where a normal install threw that
+   record away, so the list will now actually grow. If it ever grows in a way
+   that surprises the owner, revisit how records are retired.
+5. Board housekeeping the owner may want: issue #11 still sits in the In
+   Progress column while it is blocked on hardware and nobody is working it.
+   Left alone this session rather than moved without asking.
 
 ## Blockers
 
