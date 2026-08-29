@@ -865,7 +865,7 @@ def _resume_mtp_transaction(
         profile=profile,
     )
     final_inventory = _destination_inventory(session, destination)
-    verified_final, _consumed_final = _verify_owned_objects(
+    verified_final, consumed_final = _verify_owned_objects(
         session,
         destination,
         final_inventory,
@@ -876,6 +876,13 @@ def _resume_mtp_transaction(
         device_binding=current.device_binding,
         profile_id=current.profile_id,
         objects=tuple(item.ownership for item in verified_final),
+        # A workout the watch absorbed is no longer a live file, but it is
+        # still on the watch and still this app's to remove later, so it
+        # moves to the remembered list rather than being forgotten.
+        consumed=remembered_consumed_workouts(
+            final_device.consumed,
+            consumed_final,
+        ),
     )
     if reconciled_catalog != final_catalog:
         state_store.write_ownership(reconciled_catalog)
