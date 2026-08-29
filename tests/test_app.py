@@ -52,6 +52,15 @@ from marathon_planner.mtp_install import (  # noqa: E402
     MtpInstallResult,
 )
 from marathon_planner.mtp_transport import MtpError  # noqa: E402
+from marathon_planner.mtp_cleanup import (  # noqa: E402
+    MtpCleanupError,
+    MtpCleanupPreview,
+)
+from marathon_planner.mtp_state import MtpJournalKind  # noqa: E402
+from marathon_planner.mtp_workouts import (  # noqa: E402
+    MtpWorkoutScanError,
+    WatchWorkoutScan,
+)
 from marathon_planner.plan_import import PlanImportError  # noqa: E402
 from marathon_planner.usb_install import UsbInstallError  # noqa: E402
 
@@ -454,6 +463,249 @@ class WeeklyEditorActionTests(unittest.TestCase):
             app.status.value,
             "USB installation canceled; no files changed.",
         )
+
+    def test_seeing_what_is_on_the_watch_needs_no_open_plan(self) -> None:
+        app = self.make_app()
+        scan = WatchWorkoutScan(
+            manufacturer="Synthetic Garmin",
+            model="Synthetic Forerunner 265",
+            storage_name="Internal Storage",
+            session_generation=1,
+            folders=(),
+            workouts=(),
+            reached_limit=False,
+        )
+        transport = Mock()
+        app._mtp_transport_factory.return_value = transport
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch(
+                "marathon_planner.app.survey_watch_workouts",
+                return_value=scan,
+            ) as survey,
+        ):
+            result = app.survey_watch_selection()
+
+        self.assertIs(result, scan)
+        self.assertIsNone(app.open_plan)
+        survey.assert_called_once_with(transport, unittest.mock.ANY)
+        app._mtp_state_factory.assert_not_called()
+        self.assertIn("Found 0 workout(s) on the watch", app.status.value)
+        self.assertIn("Nothing on the watch was changed", app.status.value)
+
+    def test_seeing_what_is_on_the_watch_is_unavailable_off_windows(self) -> None:
+        app = self.make_app()
+
+        with patch("marathon_planner.app.sys.platform", "linux"):
+            result = app.survey_watch_selection()
+
+        self.assertIsNone(result)
+        self.assertIn("Windows MTP unavailable", app.status.value)
+        app._mtp_transport_factory.assert_not_called()
+
+    def test_a_watch_that_cannot_be_read_is_reported_without_a_change_claim(
+        self,
+    ) -> None:
+        app = self.make_app()
+        app._mtp_transport_factory.return_value = Mock()
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch(
+                "marathon_planner.app.survey_watch_workouts",
+                side_effect=MtpWorkoutScanError(
+                    "The supported MTP device does not have the exact expected "
+                    "storage."
+                ),
+            ),
+        ):
+            result = app.survey_watch_selection()
+
+        self.assertIsNone(result)
+        self.assertIn("The watch could not be read", app.status.value)
+        self.assertNotIn("Found", app.status.value)
+
+    def cleanup_preview(self, choices=()) -> Mock:
+        preview = Mock(spec_set=MtpCleanupPreview)
+        preview.model = "Synthetic Forerunner 265"
+        preview.keep_from = date(2030, 4, 5)
+        preview.choices = tuple(choices)
+        preview.default_removal_count = sum(1 for item in choices if item.remove)
+        return preview
+
+    def test_the_cleanup_offered_after_an_install_keeps_that_block_onward(
+        self,
+    ) -> None:
+        app = self.make_app()
+        app.open_plan = TrainingPlan(
+            (
+                TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 1)),
+                TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 8)),
+            )
+        )
+        preview = Mock(start_week=2)
+
+        self.assertEqual(app._installed_block_start(preview), date(2030, 4, 8))
+
+    def test_a_block_outside_the_open_plan_offers_no_cleanup_boundary(self) -> None:
+        app = self.make_app()
+        app.open_plan = TrainingPlan(
+            (TrainingWeek((self.make_workout(),), start_date=date(2030, 4, 1)),)
+        )
+
+        self.assertIsNone(app._installed_block_start(Mock(start_week=9)))
+        app.open_plan = None
+        self.assertIsNone(app._installed_block_start(Mock(start_week=1)))
+
+    def test_managing_watch_workouts_needs_no_open_plan(self) -> None:
+        app = self.make_app()
+        state_store = Mock()
+        state_store.read_journal.return_value = None
+        app._mtp_state_factory.return_value = state_store
+        transport = Mock()
+        app._mtp_transport_factory.return_value = transport
+        preview = self.cleanup_preview()
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch(
+                "marathon_planner.app.preview_watch_cleanup",
+                return_value=preview,
+            ) as build,
+        ):
+            result = app.watch_cleanup_selection(keep_from=date(2030, 4, 5))
+
+        self.assertIs(result, preview)
+        self.assertIsNone(app.open_plan)
+        self.assertEqual(build.call_args.kwargs["keep_from"], date(2030, 4, 5))
+        self.assertIn("Nothing has been removed yet", app.status.value)
+
+    def test_managing_watch_workouts_defaults_the_boundary_to_today(self) -> None:
+        app = self.make_app()
+        state_store = Mock()
+        state_store.read_journal.return_value = None
+        app._mtp_state_factory.return_value = state_store
+        app._mtp_transport_factory.return_value = Mock()
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch(
+                "marathon_planner.app.preview_watch_cleanup",
+                return_value=self.cleanup_preview(),
+            ) as build,
+        ):
+            app.watch_cleanup_selection()
+
+        self.assertEqual(build.call_args.kwargs["keep_from"], date.today())
+
+    def test_an_interrupted_cleanup_blocks_a_new_one_with_its_own_message(
+        self,
+    ) -> None:
+        app = self.make_app()
+        state_store = Mock()
+        state_store.read_journal.return_value = Mock(kind=MtpJournalKind.CLEANUP)
+        app._mtp_state_factory.return_value = state_store
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch("marathon_planner.app.preview_watch_cleanup") as build,
+        ):
+            result = app.watch_cleanup_selection()
+
+        self.assertIsNone(result)
+        build.assert_not_called()
+        self.assertIn("Finish interrupted cleanup", app.status.value)
+
+    def test_an_interrupted_install_blocks_a_cleanup_with_the_install_message(
+        self,
+    ) -> None:
+        app = self.make_app()
+        state_store = Mock()
+        state_store.read_journal.return_value = Mock(kind=MtpJournalKind.INSTALL)
+        app._mtp_state_factory.return_value = state_store
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch("marathon_planner.app.preview_watch_cleanup") as build,
+        ):
+            result = app.watch_cleanup_selection()
+
+        self.assertIsNone(result)
+        build.assert_not_called()
+        self.assertIn("Recover interrupted installation", app.status.value)
+
+    def test_applying_a_cleanup_passes_exactly_the_ticked_workouts(self) -> None:
+        app = self.make_app()
+        app._cleanup_state_store = Mock()
+        preview = self.cleanup_preview()
+        result = Mock(removed_count=2, kept_count=3)
+
+        with patch(
+            "marathon_planner.app.apply_watch_cleanup",
+            return_value=result,
+        ) as apply_cleanup:
+            applied = app.apply_watch_cleanup_choices(
+                preview,
+                frozenset({"persistent-one", "persistent-two"}),
+            )
+
+        self.assertTrue(applied)
+        apply_cleanup.assert_called_once_with(
+            preview,
+            state_store=app._cleanup_state_store,
+            confirmed=True,
+            remove_keys=frozenset({"persistent-one", "persistent-two"}),
+        )
+        self.assertIn("Removed 2 workout(s)", app.status.value)
+        self.assertIn("3 kept", app.status.value)
+
+    def test_a_failed_cleanup_says_nothing_was_removed(self) -> None:
+        app = self.make_app()
+        app._cleanup_state_store = Mock()
+
+        with patch(
+            "marathon_planner.app.apply_watch_cleanup",
+            side_effect=MtpCleanupError("the list is no longer current"),
+        ):
+            applied = app.apply_watch_cleanup_choices(
+                self.cleanup_preview(),
+                frozenset({"persistent-one"}),
+            )
+
+        self.assertFalse(applied)
+        self.assertIn("Workouts were not removed", app.status.value)
+        self.assertNotIn("Removed", app.status.value)
+
+    def test_applying_a_cleanup_without_a_listed_watch_changes_nothing(self) -> None:
+        app = self.make_app()
+
+        with patch("marathon_planner.app.apply_watch_cleanup") as apply_cleanup:
+            applied = app.apply_watch_cleanup_choices(
+                self.cleanup_preview(),
+                frozenset({"persistent-one"}),
+            )
+
+        self.assertFalse(applied)
+        apply_cleanup.assert_not_called()
+        self.assertIn("list the watch again", app.status.value)
+
+    def test_finishing_an_interrupted_cleanup_reports_what_it_did(self) -> None:
+        app = self.make_app()
+        app._mtp_state_factory.return_value = Mock()
+        app._mtp_transport_factory.return_value = Mock()
+
+        with (
+            patch("marathon_planner.app.sys.platform", "win32"),
+            patch(
+                "marathon_planner.app.recover_watch_cleanup",
+                return_value=Mock(removed_count=1, kept_count=4),
+            ),
+        ):
+            finished = app.finish_watch_cleanup()
+
+        self.assertTrue(finished)
+        self.assertIn("removed 1 workout(s), kept 4", app.status.value)
 
     def test_mtp_preview_requires_an_imported_dated_plan(self) -> None:
         app = self.make_app()

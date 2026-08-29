@@ -38,8 +38,27 @@ from marathon_planner.mtp_install import (
     preview_mtp_install as build_mtp_install_preview,
     recover_mtp_install,
 )
-from marathon_planner.mtp_state import MtpStateError, MtpStateStore
+from marathon_planner.mtp_cleanup import (
+    MtpCleanupError,
+    MtpCleanupPreview,
+    apply_watch_cleanup,
+    format_watch_cleanup_preview,
+    preview_watch_cleanup,
+    recover_watch_cleanup,
+)
+from marathon_planner.mtp_state import (
+    MtpJournalKind,
+    MtpStateError,
+    MtpStateStore,
+)
 from marathon_planner.mtp_transport import MtpError, MtpTransport
+from marathon_planner.mtp_workouts import (
+    MtpWorkoutScanError,
+    WatchWorkoutScan,
+    format_watch_scan_findings,
+    format_watch_workout_scan,
+    survey_watch_workouts,
+)
 from marathon_planner.mtp_wpd import WpdMtpTransport
 from marathon_planner.plan_import import PlanImportError, load_plan_file
 from marathon_planner.plan_export import (
@@ -122,6 +141,18 @@ first, and nothing is written until you confirm that exact preview.
 weeks and terrain. If an installation is interrupted, reconnect the same \
 watch and choose "Recover interrupted installation" to finish it safely.
 
+8. Your watch keeps every workout you send it until something removes \
+them. "Manage watch workouts" lists everything in the watch's workout \
+list so you can tick what to remove and confirm once, instead of \
+deleting them one at a time on the watch. Workouts this app installed \
+that are dated before the block you are keeping are ticked for you; \
+anything else, including workouts you made in Garmin Connect, starts \
+unticked and says so. You can still tick those and remove them. Your \
+recorded runs are never listed and are never removed. After an \
+installation the app offers this list with the right dates already \
+chosen. "See what's on the watch" shows the same workouts read-only, \
+with a summary you can copy and share that contains no workout names.
+
 Your plan stays on this computer. Marathon Planner never asks for your \
 Garmin username or password, and it only ever replaces workout files it \
 created itself."""
@@ -183,6 +214,18 @@ def format_mtp_ui_preview(preview: MtpUiInstallPreview) -> str:
             f"Terrain: {preview.terrain}",
             "",
             format_mtp_install_preview(preview.install),
+        )
+    )
+
+
+def format_watch_report(scan: WatchWorkoutScan) -> str:
+    """Render the runner's list of watch workouts above the shareable findings."""
+
+    return "\n".join(
+        (
+            format_watch_workout_scan(scan),
+            "",
+            format_watch_scan_findings(scan),
         )
     )
 
@@ -354,22 +397,13 @@ class WorkoutRowEditor(ttk.Frame):
         )
 
 
-class WorkoutListView(ttk.Frame):
-    """Aligned heading row above a scrollable list of workout rows."""
+class ScrollableRows(ttk.Frame):
+    """A vertically scrolling area of rows that fills its container."""
 
-    def __init__(self, master: tk.Misc) -> None:
+    def __init__(self, master: tk.Misc, *, height: int = 250) -> None:
         super().__init__(master)
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
-
-        header = ttk.Frame(self)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        configure_workout_columns(header)
-        for column, (heading, _minsize, _weight) in enumerate(WORKOUT_COLUMNS):
-            if heading:
-                ttk.Label(
-                    header, text=heading, style="ColumnHeading.TLabel"
-                ).grid(row=0, column=column, sticky="w", padx=(0, _COLUMN_GAP))
+        self.rowconfigure(0, weight=1)
 
         background = ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0"
         self.canvas = tk.Canvas(
@@ -377,13 +411,13 @@ class WorkoutListView(ttk.Frame):
             borderwidth=0,
             highlightthickness=0,
             background=background,
-            height=int(250 * _ui_scale(self)),
+            height=int(height * _ui_scale(self)),
         )
-        self.canvas.grid(row=1, column=0, sticky="nsew")
+        self.canvas.grid(row=0, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(
             self, orient="vertical", command=self.canvas.yview
         )
-        scrollbar.grid(row=1, column=1, sticky="ns", padx=(4, 0))
+        scrollbar.grid(row=0, column=1, sticky="ns", padx=(4, 0))
         self.canvas.configure(yscrollcommand=scrollbar.set)
 
         self.interior = ttk.Frame(self.canvas)
@@ -414,11 +448,43 @@ class WorkoutListView(ttk.Frame):
         self.canvas.yview_scroll(-(event.delta // 120), "units")
 
     def reveal_end(self) -> None:
-        """Scroll to the newest row so a just-added workout is visible."""
+        """Scroll to the newest row so a just-added entry is visible."""
 
         self.canvas.update_idletasks()
         if self.interior.winfo_reqheight() > self.canvas.winfo_height():
             self.canvas.yview_moveto(1.0)
+
+
+class WorkoutListView(ttk.Frame):
+    """Aligned heading row above a scrollable list of workout rows."""
+
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        header = ttk.Frame(self)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        configure_workout_columns(header)
+        for column, (heading, _minsize, _weight) in enumerate(WORKOUT_COLUMNS):
+            if heading:
+                ttk.Label(
+                    header, text=heading, style="ColumnHeading.TLabel"
+                ).grid(row=0, column=column, sticky="w", padx=(0, _COLUMN_GAP))
+
+        self.rows = ScrollableRows(self)
+        self.rows.grid(row=1, column=0, columnspan=2, sticky="nsew")
+
+    @property
+    def interior(self) -> ttk.Frame:
+        """The frame each workout row is gridded into."""
+
+        return self.rows.interior
+
+    def reveal_end(self) -> None:
+        """Scroll to the newest row so a just-added workout is visible."""
+
+        self.rows.reveal_end()
 
 
 class MarathonPlannerApp(ttk.Frame):
@@ -627,6 +693,36 @@ class MarathonPlannerApp(ttk.Frame):
             state="disabled",
         )
         self.mtp_recover_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        # Neither of these needs a plan open, so both are usable as soon as
+        # the window appears.
+        ttk.Label(
+            mtp_path,
+            text="Workouts already on the watch",
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.mtp_cleanup_button = ttk.Button(
+            mtp_path,
+            text="Manage watch workouts…",
+            command=self.manage_watch_workouts,
+        )
+        self.mtp_cleanup_button.grid(
+            row=1, column=1, sticky="w", padx=(6, 0), pady=(6, 0)
+        )
+        self.mtp_survey_button = ttk.Button(
+            mtp_path,
+            text="See what's on the watch…",
+            command=self.show_watch_workouts,
+        )
+        self.mtp_survey_button.grid(
+            row=1, column=2, sticky="w", padx=(8, 0), pady=(6, 0)
+        )
+        self.mtp_finish_cleanup_button = ttk.Button(
+            mtp_path,
+            text="Finish interrupted cleanup…",
+            command=self.finish_watch_cleanup,
+        )
+        self.mtp_finish_cleanup_button.grid(
+            row=1, column=3, sticky="w", padx=(8, 0), pady=(6, 0)
+        )
 
         self.install_caption = tk.StringVar(value=INSTALL_CAPTION_NO_PLAN)
         safety_caption = ttk.Label(
@@ -1026,6 +1122,337 @@ class MarathonPlannerApp(ttk.Frame):
         if preview is not None:
             self._show_mtp_install_preview(preview)
 
+    def show_watch_workouts(self) -> None:
+        """Read what the connected watch holds and show it, changing nothing."""
+
+        scan = self.survey_watch_selection()
+        if scan is not None:
+            self._show_watch_workout_report(scan)
+
+    def survey_watch_selection(self) -> WatchWorkoutScan | None:
+        """Survey the watch through the injected transport factory.
+
+        No plan needs to be open, and nothing is written: the app opens the
+        device, lists the workouts it can read, and closes the connection.
+        """
+
+        if sys.platform != "win32":
+            self.status.set(
+                "Windows MTP unavailable: this installation path requires Windows."
+            )
+            return None
+        try:
+            transport = self._mtp_transport_factory()
+            scan = survey_watch_workouts(
+                transport,
+                FORERUNNER_265_PROVISIONAL_PROFILE,
+            )
+        except (MtpError, MtpInstallError, MtpWorkoutScanError) as error:
+            self._set_watch_survey_error(error)
+            return None
+        self.status.set(
+            f"Found {len(scan.workouts)} workout(s) on the watch; "
+            f"{scan.dated_workout_count} still show their authored date. "
+            "Nothing on the watch was changed."
+        )
+        return scan
+
+    def _set_watch_survey_error(self, error: Exception) -> None:
+        message = str(error)
+        if "unavailable" in message.lower() or "only on Windows" in message:
+            self.status.set(f"Windows MTP unavailable: {message}")
+            return
+        self.status.set(f"The watch could not be read: {message}")
+
+    def _show_watch_workout_report(self, scan: WatchWorkoutScan) -> None:
+        window = tk.Toplevel(self)
+        window.title("What is on the watch")
+        window.minsize(760, 420)
+        window.rowconfigure(0, weight=1)
+        window.columnconfigure(0, weight=1)
+        text = tk.Text(window, wrap="none", padx=12, pady=12, font=("Consolas", 10))
+        text.grid(row=0, column=0, sticky="nsew")
+        vertical = ttk.Scrollbar(window, orient="vertical", command=text.yview)
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(window, orient="horizontal", command=text.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        text.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        text.insert("1.0", format_watch_report(scan))
+        text.configure(state="disabled")
+        buttons = ttk.Frame(window)
+        buttons.grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=12)
+        buttons.columnconfigure(0, weight=1)
+        ttk.Label(
+            buttons,
+            text=(
+                "Read-only: nothing on the watch was changed. Removing workouts "
+                "is not built yet."
+            ),
+            style="Caption.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            buttons,
+            text="Copy shareable findings",
+            command=lambda: self._copy_text(format_watch_scan_findings(scan)),
+        ).grid(row=0, column=1, sticky="e")
+        ttk.Button(
+            buttons,
+            text="Copy everything",
+            command=lambda: self._copy_text(format_watch_report(scan)),
+        ).grid(row=0, column=2, sticky="e", padx=(8, 0))
+        ttk.Button(buttons, text="Close", command=window.destroy).grid(
+            row=0, column=3, sticky="e", padx=(8, 0)
+        )
+
+    def _copy_text(self, value: str) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(value)
+        self.status.set("Copied to the clipboard.")
+
+    def manage_watch_workouts(self, keep_from: date | None = None) -> None:
+        """Show every workout on the watch so any of it can be removed."""
+
+        preview = self.watch_cleanup_selection(keep_from=keep_from)
+        if preview is not None:
+            self._show_watch_cleanup(preview)
+
+    def watch_cleanup_selection(
+        self,
+        *,
+        keep_from: date | None = None,
+    ) -> MtpCleanupPreview | None:
+        """List the watch's workouts for removal without changing anything.
+
+        Workouts dated before ``keep_from`` that this app can prove it
+        installed open already set to be removed. Everything else opens set to
+        be kept. Nothing is removed until the runner confirms.
+        """
+
+        if sys.platform != "win32":
+            self.status.set(
+                "Windows MTP unavailable: this installation path requires Windows."
+            )
+            return None
+        boundary = keep_from or date.today()
+        try:
+            state_store = self._mtp_state_factory()
+            journal = state_store.read_journal()
+            if journal is not None:
+                self._report_pending_transaction(journal)
+                return None
+            transport = self._mtp_transport_factory()
+            preview = preview_watch_cleanup(
+                transport,
+                FORERUNNER_265_PROVISIONAL_PROFILE,
+                planning_state=state_store.read_planning_state(),
+                keep_from=boundary,
+            )
+        except (
+            MtpError,
+            MtpInstallError,
+            MtpCleanupError,
+            MtpWorkoutScanError,
+            MtpStateError,
+        ) as error:
+            self._set_watch_survey_error(error)
+            return None
+        self._cleanup_state_store = state_store
+        self.status.set(
+            f"{len(preview.choices)} workout(s) on the watch; "
+            f"{preview.default_removal_count} set to be removed. "
+            "Nothing has been removed yet."
+        )
+        return preview
+
+    def _report_pending_transaction(self, journal: object) -> None:
+        if getattr(journal, "kind", None) is MtpJournalKind.CLEANUP:
+            self.status.set(
+                "An interrupted workout cleanup is safely recorded. Reconnect "
+                "the same watch and choose Finish interrupted cleanup."
+            )
+            return
+        self.status.set(
+            "MTP recovery required: an interrupted installation is safely "
+            "journaled. Reconnect the same device, select the same week block "
+            "and terrain, then choose Recover interrupted installation."
+        )
+
+    def _show_watch_cleanup(self, preview: MtpCleanupPreview) -> None:
+        window = tk.Toplevel(self)
+        window.title("Manage the workouts on your watch")
+        window.minsize(820, 460)
+        window.rowconfigure(1, weight=1)
+        window.columnconfigure(0, weight=1)
+
+        intro = ttk.Label(
+            window,
+            text=(
+                f"Your {preview.model} is holding {len(preview.choices)} "
+                "workout(s). Tick the ones to remove. Workouts this app "
+                "installed and dated before "
+                f"{preview.keep_from.isoformat()} are already ticked; "
+                "everything else starts unticked. Your recorded runs are not "
+                "listed here and are never removed."
+            ),
+            justify="left",
+            wraplength=int(760 * _ui_scale(window)),
+        )
+        intro.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
+
+        rows = ScrollableRows(window, height=280)
+        rows.grid(row=1, column=0, sticky="nsew", padx=12)
+        rows.interior.columnconfigure(1, weight=1)
+
+        selections: dict[str, tk.BooleanVar] = {}
+        for index, choice in enumerate(preview.choices):
+            variable = tk.BooleanVar(value=choice.remove)
+            selections[choice.key] = variable
+            ttk.Checkbutton(
+                rows.interior,
+                text="Remove",
+                variable=variable,
+            ).grid(row=index, column=0, sticky="w", padx=(0, 10), pady=2)
+            ttk.Label(
+                rows.interior,
+                text=f"{choice.display_date}   {choice.workout.display_name}",
+            ).grid(row=index, column=1, sticky="w", pady=2)
+            ttk.Label(
+                rows.interior,
+                text=(
+                    "installed by this app"
+                    if choice.proven
+                    else "not installed by this app"
+                ),
+                style="Caption.TLabel",
+            ).grid(row=index, column=2, sticky="e", padx=(10, 0), pady=2)
+
+        buttons = ttk.Frame(window)
+        buttons.grid(row=2, column=0, sticky="ew", padx=12, pady=12)
+        buttons.columnconfigure(0, weight=1)
+        ttk.Label(
+            buttons,
+            text="Nothing is removed until you confirm.",
+            style="Caption.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+
+        def close_window() -> None:
+            try:
+                preview.close_session()
+            except MtpError:
+                pass
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", close_window)
+        ttk.Button(buttons, text="Close", command=close_window).grid(
+            row=0, column=1, sticky="e"
+        )
+        ttk.Button(
+            buttons,
+            text="Remove ticked workouts…",
+            command=lambda: self._confirm_watch_cleanup(
+                preview,
+                selections,
+                window,
+            ),
+        ).grid(row=0, column=2, sticky="e", padx=(8, 0))
+
+    def _confirm_watch_cleanup(
+        self,
+        preview: MtpCleanupPreview,
+        selections: dict[str, tk.BooleanVar],
+        window: tk.Toplevel,
+    ) -> None:
+        chosen = frozenset(key for key, value in selections.items() if value.get())
+        if not chosen:
+            self.status.set("No workouts were ticked, so nothing was removed.")
+            return
+        unproven = sum(
+            1
+            for choice in preview.choices
+            if choice.key in chosen and not choice.proven
+        )
+        warning = (
+            f"\n\n{unproven} of these were not installed by this app. "
+            "Removing one deletes it from the watch."
+            if unproven
+            else ""
+        )
+        if not messagebox.askyesno(
+            title="Confirm removal from the watch",
+            message=(
+                f"Remove {len(chosen)} workout(s) from the watch and keep the "
+                f"other {len(preview.choices) - len(chosen)}?{warning}"
+            ),
+        ):
+            self.status.set("Removal canceled; nothing on the watch was changed.")
+            return
+        self.apply_watch_cleanup_choices(preview, chosen)
+        window.destroy()
+
+    def apply_watch_cleanup_choices(
+        self,
+        preview: MtpCleanupPreview,
+        remove_keys: frozenset[str],
+    ) -> bool:
+        """Remove exactly the ticked workouts through the confirmed preview."""
+
+        state_store = getattr(self, "_cleanup_state_store", None)
+        if state_store is None:
+            self.status.set("Removal not applied: list the watch again first.")
+            return False
+        try:
+            result = apply_watch_cleanup(
+                preview,
+                state_store=state_store,
+                confirmed=True,
+                remove_keys=remove_keys,
+            )
+        except (
+            MtpError,
+            MtpInstallError,
+            MtpCleanupError,
+            MtpWorkoutScanError,
+            MtpStateError,
+        ) as error:
+            self.status.set(f"Workouts were not removed: {error}")
+            return False
+        self.status.set(
+            f"Removed {result.removed_count} workout(s) from the watch; "
+            f"{result.kept_count} kept. Recorded runs were not touched."
+        )
+        return True
+
+    def finish_watch_cleanup(self) -> bool:
+        """Finish an interrupted cleanup forward from its durable record."""
+
+        if sys.platform != "win32":
+            self.status.set(
+                "Windows MTP unavailable: this installation path requires Windows."
+            )
+            return False
+        try:
+            state_store = self._mtp_state_factory()
+            transport = self._mtp_transport_factory()
+            result = recover_watch_cleanup(
+                transport,
+                FORERUNNER_265_PROVISIONAL_PROFILE,
+                state_store=state_store,
+            )
+        except (
+            MtpError,
+            MtpInstallError,
+            MtpCleanupError,
+            MtpWorkoutScanError,
+            MtpStateError,
+        ) as error:
+            self.status.set(f"The interrupted cleanup was not finished: {error}")
+            return False
+        self.status.set(
+            f"Finished the interrupted cleanup: removed {result.removed_count} "
+            f"workout(s), kept {result.kept_count}."
+        )
+        return True
+
     def preview_mtp_selection(
         self,
         *,
@@ -1154,9 +1581,41 @@ class MarathonPlannerApp(ttk.Frame):
                 "objects changed."
             )
             return
-        self.install_mtp_preview(preview, confirmed=True)
+        installed = self.install_mtp_preview(preview, confirmed=True)
         self._close_mtp_preview(preview)
         preview_window.destroy()
+        if installed:
+            self._offer_watch_cleanup(preview)
+
+    def _offer_watch_cleanup(self, preview: MtpUiInstallPreview) -> None:
+        """Offer to tidy older workouts now the new block is on the watch.
+
+        The new block has to be on the watch before the app can list it
+        alongside what was already there, so this is a second confirmed step
+        rather than part of the installation. The watch connection from the
+        installation is closed before this opens its own.
+        """
+
+        keep_from = self._installed_block_start(preview)
+        if keep_from is None:
+            return
+        if not messagebox.askyesno(
+            title="Remove older workouts?",
+            message=(
+                "The new workouts are on the watch. Review what is already "
+                "there and choose what to remove?\n\nWorkouts this app "
+                f"installed and dated before {keep_from.isoformat()} will be "
+                "ticked for you. Nothing is removed until you confirm."
+            ),
+        ):
+            return
+        self.manage_watch_workouts(keep_from=keep_from)
+
+    def _installed_block_start(self, preview: MtpUiInstallPreview) -> date | None:
+        plan = self.open_plan
+        if plan is None or not 1 <= preview.start_week <= len(plan.weeks):
+            return None
+        return plan.weeks[preview.start_week - 1].start_date
 
     def install_mtp_preview(
         self,

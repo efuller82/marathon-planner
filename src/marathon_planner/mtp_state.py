@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from enum import StrEnum
 from hashlib import sha256
 import hmac
@@ -23,11 +24,15 @@ from marathon_planner.mtp_transport import (
 
 MTP_OWNERSHIP_FORMAT = "marathon-planner-mtp-ownership"
 MTP_JOURNAL_FORMAT = "marathon-planner-mtp-journal"
-MTP_STATE_SCHEMA_VERSION = 1
+# Version 2 added the consumed-workout inventory and the journal kind.
+# Version 1 files still on disk are read and upgraded on the next write.
+MTP_STATE_SCHEMA_VERSION = 2
+_SUPPORTED_STATE_SCHEMAS = (1, 2)
 
 _MAX_STATE_BYTES = 1_000_000
 _MAX_OWNED_DEVICES = 16
 _MAX_OWNED_OBJECTS = 2_500
+_MAX_CONSUMED_WORKOUTS = 2_500
 _MAX_JOURNAL_OPERATIONS = 5_000
 _MAX_BINDING_VALUES = 16
 _SALT_BYTES = 32
@@ -44,6 +49,17 @@ class MtpJournalAction(StrEnum):
 
     COPY = "COPY"
     REMOVE = "REMOVE"
+
+
+class MtpJournalKind(StrEnum):
+    """Which transaction a journal is recovering.
+
+    Install and cleanup both journal removals, so the kind is recorded
+    explicitly rather than guessed at from the operations.
+    """
+
+    INSTALL = "INSTALL"
+    CLEANUP = "CLEANUP"
 
 
 class MtpJournalPhase(StrEnum):
@@ -77,12 +93,36 @@ class MtpOwnedObject:
 
 
 @dataclass(frozen=True, slots=True)
+class MtpConsumedWorkout:
+    """One workout this app installed that the watch has since absorbed.
+
+    The watch renames an imported file, so the name it carries on the
+    device is no longer the app's. What still proves the workout came from
+    here is its exact content: the byte count and digest below. The
+    authored date is kept because the cleanup defaults need it, and the
+    watch's own display name only ever shows a month and day.
+    """
+
+    installed_filename: str
+    size: int
+    sha256: str
+    authored_date: str
+
+    def __post_init__(self) -> None:
+        _validate_filename(self.installed_filename)
+        _validate_size(self.size)
+        _validate_digest(self.sha256, "Consumed workout digest")
+        _validate_iso_date(self.authored_date)
+
+
+@dataclass(frozen=True, slots=True)
 class MtpDeviceOwnership:
     """All locally owned objects for one salted device binding and profile."""
 
     device_binding: str = field(repr=False)
     profile_id: str
     objects: tuple[MtpOwnedObject, ...]
+    consumed: tuple[MtpConsumedWorkout, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_digest(self.device_binding, "MTP device binding")
@@ -90,6 +130,14 @@ class MtpDeviceOwnership:
         if not isinstance(self.objects, tuple) or len(self.objects) > _MAX_OWNED_OBJECTS:
             raise MtpStateError("MTP owned object inventory is outside bounds.")
         _require_unique_objects(self.objects)
+        if (
+            not isinstance(self.consumed, tuple)
+            or len(self.consumed) > _MAX_CONSUMED_WORKOUTS
+        ):
+            raise MtpStateError("MTP consumed workout inventory is outside bounds.")
+        digests = [item.sha256 for item in self.consumed]
+        if len(digests) != len(set(digests)):
+            raise MtpStateError("MTP consumed workout digests must be unique.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,11 +244,14 @@ class MtpJournal:
     session_generation: int
     destination_persistent_id: str = field(repr=False)
     operations: tuple[MtpJournalOperation, ...]
+    kind: MtpJournalKind = MtpJournalKind.INSTALL
 
     def __post_init__(self) -> None:
         _validate_token(self.transaction_id, "MTP transaction ID")
         if not isinstance(self.phase, MtpJournalPhase):
             raise MtpStateError("MTP journal phase is invalid.")
+        if not isinstance(self.kind, MtpJournalKind):
+            raise MtpStateError("MTP journal kind is invalid.")
         _validate_digest(self.device_binding, "MTP device binding")
         _validate_token(self.profile_id, "MTP compatibility profile")
         if type(self.session_generation) is not int or self.session_generation < 1:
@@ -477,6 +528,15 @@ def _ownership_content(catalog: MtpOwnershipCatalog) -> bytes:
                     }
                     for item in device.objects
                 ],
+                "consumed": [
+                    {
+                        "installed_filename": item.installed_filename,
+                        "size": item.size,
+                        "sha256": item.sha256,
+                        "authored_date": item.authored_date,
+                    }
+                    for item in device.consumed
+                ],
             }
             for device in catalog.devices
         ],
@@ -489,6 +549,7 @@ def _journal_content(journal: MtpJournal) -> bytes:
         "format": MTP_JOURNAL_FORMAT,
         "schema_version": MTP_STATE_SCHEMA_VERSION,
         "transaction_id": journal.transaction_id,
+        "kind": journal.kind.value,
         "phase": journal.phase.value,
         "device_binding": journal.device_binding,
         "profile_id": journal.profile_id,
@@ -520,33 +581,60 @@ def _ownership_from_document(document: object) -> MtpOwnershipCatalog:
     if (
         root["format"] != MTP_OWNERSHIP_FORMAT
         or type(root["schema_version"]) is not int
-        or root["schema_version"] != MTP_STATE_SCHEMA_VERSION
+        or root["schema_version"] not in _SUPPORTED_STATE_SCHEMAS
     ):
         raise MtpStateError("MTP ownership state format is unsupported.")
+    schema_version = root["schema_version"]
     devices_value = root["devices"]
     if not isinstance(devices_value, list) or len(devices_value) > _MAX_OWNED_DEVICES:
         raise MtpStateError("MTP owned device inventory is outside bounds.")
     devices: list[MtpDeviceOwnership] = []
     for value in devices_value:
-        item = _require_object(
-            value,
-            {"device_binding", "profile_id", "objects"},
-            "MTP owned device",
-        )
+        # Version 1 predates the consumed-workout inventory, so a file written
+        # by an earlier release reads back with none and gains the field the
+        # next time state is written.
+        fields = {"device_binding", "profile_id", "objects"}
+        if schema_version >= 2:
+            fields = fields | {"consumed"}
+        item = _require_object(value, fields, "MTP owned device")
         objects_value = item["objects"]
         if not isinstance(objects_value, list) or len(objects_value) > _MAX_OWNED_OBJECTS:
             raise MtpStateError("MTP owned object inventory is outside bounds.")
         objects = tuple(
             _owned_object_from_document(object_value) for object_value in objects_value
         )
+        consumed_value = item["consumed"] if schema_version >= 2 else []
+        if (
+            not isinstance(consumed_value, list)
+            or len(consumed_value) > _MAX_CONSUMED_WORKOUTS
+        ):
+            raise MtpStateError("MTP consumed workout inventory is outside bounds.")
+        consumed = tuple(
+            _consumed_workout_from_document(entry) for entry in consumed_value
+        )
         devices.append(
             MtpDeviceOwnership(
                 device_binding=item["device_binding"],
                 profile_id=item["profile_id"],
                 objects=objects,
+                consumed=consumed,
             )
         )
     return MtpOwnershipCatalog(tuple(devices))
+
+
+def _consumed_workout_from_document(document: object) -> MtpConsumedWorkout:
+    item = _require_object(
+        document,
+        {"installed_filename", "size", "sha256", "authored_date"},
+        "MTP consumed workout",
+    )
+    return MtpConsumedWorkout(
+        installed_filename=item["installed_filename"],
+        size=item["size"],
+        sha256=item["sha256"],
+        authored_date=item["authored_date"],
+    )
 
 
 def _owned_object_from_document(document: object) -> MtpOwnedObject:
@@ -571,27 +659,33 @@ def _owned_object_from_document(document: object) -> MtpOwnedObject:
 
 
 def _journal_from_document(document: object) -> MtpJournal:
-    root = _require_object(
-        document,
-        {
-            "format",
-            "schema_version",
-            "transaction_id",
-            "phase",
-            "device_binding",
-            "profile_id",
-            "session_generation",
-            "destination_persistent_id",
-            "operations",
-        },
-        "MTP recovery journal",
-    )
-    if (
-        root["format"] != MTP_JOURNAL_FORMAT
-        or type(root["schema_version"]) is not int
-        or root["schema_version"] != MTP_STATE_SCHEMA_VERSION
-    ):
+    # Version 1 journals carry no kind; an earlier release only ever wrote
+    # install journals, so one reads back as an install.
+    schema_version = _declared_schema_version(document)
+    fields = {
+        "format",
+        "schema_version",
+        "transaction_id",
+        "phase",
+        "device_binding",
+        "profile_id",
+        "session_generation",
+        "destination_persistent_id",
+        "operations",
+    }
+    if schema_version >= 2:
+        fields = fields | {"kind"}
+    root = _require_object(document, fields, "MTP recovery journal")
+    if root["format"] != MTP_JOURNAL_FORMAT:
         raise MtpStateError("MTP recovery journal format is unsupported.")
+    try:
+        kind = (
+            MtpJournalKind(root["kind"])
+            if schema_version >= 2
+            else MtpJournalKind.INSTALL
+        )
+    except (TypeError, ValueError) as error:
+        raise MtpStateError("MTP journal kind is invalid.") from error
     operations_value = root["operations"]
     if (
         not isinstance(operations_value, list)
@@ -614,7 +708,19 @@ def _journal_from_document(document: object) -> MtpJournal:
         session_generation=root["session_generation"],
         destination_persistent_id=root["destination_persistent_id"],
         operations=operations,
+        kind=kind,
     )
+
+
+def _declared_schema_version(document: object) -> int:
+    """Read the schema version a state document declares, or refuse it."""
+
+    if not isinstance(document, dict):
+        raise MtpStateError("MTP local state schema is invalid.")
+    version = document.get("schema_version")
+    if type(version) is not int or version not in _SUPPORTED_STATE_SCHEMAS:
+        raise MtpStateError("MTP local state schema version is unsupported.")
+    return version
 
 
 def _journal_operation_from_document(document: object) -> MtpJournalOperation:
@@ -714,6 +820,21 @@ def _validate_identifier(value: object, label: str) -> None:
 def _validate_token(value: object, label: str) -> None:
     if not isinstance(value, str) or _TOKEN.fullmatch(value) is None:
         raise MtpStateError(f"{label} is invalid.")
+
+
+def _validate_iso_date(value: object) -> None:
+    if not isinstance(value, str):
+        raise MtpStateError("Consumed workout authored date is invalid.")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as error:
+        raise MtpStateError(
+            "Consumed workout authored date must use YYYY-MM-DD."
+        ) from error
+    if parsed.isoformat() != value:
+        raise MtpStateError(
+            "Consumed workout authored date must use YYYY-MM-DD."
+        )
 
 
 def _validate_digest(value: object, label: str) -> None:
